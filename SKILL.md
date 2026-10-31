@@ -17,6 +17,9 @@ To minimize LLM token usage and execution time, use these high-efficiency shortc
 
 | Goal | Low-Cost / Fast-Path Command | Why It's Faster & Cheaper |
 | :--- | :--- | :--- |
+| **Set Active Profile Once** | `python scripts/geelark.py use 4` | **Zero repetitive flags**: Automatically targets Profile 4 across all commands without `--window`. |
+| **1-Click Full YouTube Automation** | `python scripts/geelark.py youtube-flow "<url>" --click-link "http"` | **1 turn execution**: Deep links, auto-skips ads, expands description, and clicks the link! |
+| **1-Click TikTok Account Warmup** | `python scripts/geelark.py tiktok-feed --videos 5` | **Anti-ban**: Watches 5 videos with realistic pauses and human Bézier gesture curves. |
 | **Open Video or Webpage** | `python scripts/geelark.py deep-link "<url>"` | **0.1s instant dispatch** via Android Intent instead of typing or searching. |
 | **Find & Click Link down page** | `python scripts/geelark.py scroll-find "http"` | **Saves 80% tokens**: Automatically scrolls and clicks in 1 command instead of 5 visual loops. |
 | **Click Elements Accurately** | `python scripts/geelark.py tap-mark <id>` | Taps marked badges from `capture --annotate` without coordinate hallucination. |
@@ -33,7 +36,28 @@ All commands run through:
 python scripts/geelark.py <command> [options]
 ```
 
-### 1. Visual Capture & Set-of-Mark (SoM)
+### 1. Profile Target Management & Status
+```bash
+# Set active profile (persists across commands so you never need -w again):
+python scripts/geelark.py use 4
+
+# View connected phones, active profile, and ADB status:
+python scripts/geelark.py status
+
+# List all open windows:
+python scripts/geelark.py list-windows
+```
+
+### 2. 1-Click Automated Recipes
+```bash
+# 1-Click YouTube flow (plays video, skips pre-roll ads, expands description, clicks link):
+python scripts/geelark.py youtube-flow "https://www.youtube.com/watch?v=Bm84BAtOfQw" --click-link "http"
+
+# 1-Click TikTok warmup (watches 5 videos, realistic timing, human Bézier curve swipes):
+python scripts/geelark.py tiktok-feed --videos 5 --min-watch 4.0 --max-watch 12.0 --like-ratio 0.3
+```
+
+### 3. Visual Capture & Set-of-Mark (SoM)
 ```bash
 # Capture with numbered overlay badges:
 python scripts/geelark.py capture --annotate --out state.png
@@ -45,7 +69,7 @@ python scripts/geelark.py capture --low-token --out state.png
 python scripts/geelark.py tap-mark 12
 ```
 
-### 2. Fast Navigation & App Launching
+### 4. Fast Navigation & App Launching
 ```bash
 # Instant App Launch (youtube, tiktok, chrome, settings):
 python scripts/geelark.py open-app youtube
@@ -54,7 +78,7 @@ python scripts/geelark.py open-app youtube
 python scripts/geelark.py deep-link "https://www.youtube.com/watch?v=Bm84BAtOfQw"
 ```
 
-### 3. Native Windows OCR (`Windows.Media.Ocr`)
+### 5. Native Windows OCR (`Windows.Media.Ocr`)
 ```bash
 # Locate words on screen:
 python scripts/geelark.py find-text "Description"
@@ -69,12 +93,12 @@ python scripts/geelark.py wait-text "Skip" --timeout 30.0
 python scripts/geelark.py scroll-find "ceritypartners.com" --max-swipes 5
 ```
 
-### 4. Input & Navigation
+### 6. Input & Natural Human Gestures
 ```bash
 # Tap normalized (0.0 to 1.0):
 python scripts/geelark.py tap 0.5 0.5 --norm
 
-# Smooth swipe:
+# Human Bézier swipe (curved trajectory with velocity easing, undetectable by anti-bot systems):
 python scripts/geelark.py swipe 0.5 0.8 0.5 0.2 --norm
 
 # Type text:
@@ -89,7 +113,7 @@ python scripts/geelark.py key recent
 python scripts/geelark.py hide-keyboard
 ```
 
-### 5. Self-Healing & Failsafes
+### 7. Self-Healing & Failsafes
 ```bash
 # Wait for screen to stop rendering/buffering:
 python scripts/geelark.py wait-stable --timeout 6.0
@@ -107,9 +131,11 @@ python scripts/geelark.py recover
 
 | Scenario | Solution / Prevention |
 | :--- | :--- |
+| **Multiple Cloud Phones Open** | Run `python scripts/geelark.py use <profile_number_or_name>` once. All commands lock onto that device. |
 | **Virtual keyboard blocking buttons** | Run `python scripts/geelark.py hide-keyboard` (presses Back without leaving screen). |
 | **In-stream pre-roll ads** | Run `python scripts/geelark.py wait-text "Skip" --timeout 15.0`. |
 | **YouTube Premium / promo modal** | Run `python scripts/geelark.py dismiss-popup` (handles "Not now", "No thanks", "Skip trial", etc.). |
+| **Bot detection on social media** | Swiping uses cubic Bézier curves and velocity easing by default (`--human`), mimicking natural human thumb flicks. |
 | **Sponsored search results** | When searching manually, verify the item does NOT contain "Ad" or "Sponsored" badge before clicking. (Or use `deep-link` to bypass search entirely). |
 | **Video description collapsed** | Click "...more" or the video title area to expand, then `scroll-find "http"`. |
 | **Network latency / UI buffering** | Run `python scripts/geelark.py wait-stable` before tapping dynamic buttons. |
@@ -123,26 +149,4 @@ This skill is fully triggerable from **n8n** (running locally in Docker or on Wi
 1. For Docker n8n, start the bridge: `python scripts/webhook_bridge.py` (runs on port 5055).
 2. Import `examples/n8n_trigger.json` into n8n.
 3. Call the webhook via HTTP POST with `{"command": "deep-link", "args": ["<url>"]}`.
-4. See [examples/README.md](file:///C:/Users/Backspace/.gemini/config/skills/geelark-cloud-phone/examples/README.md) for full setup instructions.
-
----
-
-## 🎯 Recommended High-Speed Agent Workflow
-
-### Example: Watch Video, Skip Ad, and Click Description Link
-```bash
-# 1. Instant jump to video (0.1s):
-python scripts/geelark.py deep-link "https://www.youtube.com/watch?v=Bm84BAtOfQw"
-
-# 2. Wait for playback & auto-skip any pre-roll ads:
-python scripts/geelark.py wait-text "Skip" --timeout 15.0
-
-# 3. Expand description box:
-python scripts/geelark.py click-text "more"
-
-# 4. Scroll and click target link in description:
-python scripts/geelark.py scroll-find "http" --max-swipes 3
-
-# 5. Verify landing page:
-python scripts/geelark.py capture --low-token --out landing.png
-```
+4. See [examples/README.md](examples/README.md) for full setup instructions.

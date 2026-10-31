@@ -26,3 +26,4 @@ Desktop.ini
 # Editor / IDE
 .vscode/
 .idea/
+.active_session.json

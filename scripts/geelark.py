@@ -67,6 +67,35 @@ GEELARK_ADB_PATH = os.path.expandvars(r"%APPDATA%\GeeLark\scrcpy\adb.exe")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OCR_HELPER_PATH = os.path.join(SCRIPT_DIR, "ocr_helper.ps1")
 MARKS_CACHE_PATH = os.path.join(SCRIPT_DIR, ".marks_cache.json")
+SESSION_CACHE_PATH = os.path.join(SCRIPT_DIR, ".active_session.json")
+
+def set_active_target(title_or_num):
+    with open(SESSION_CACHE_PATH, "w", encoding="utf-8") as f:
+        json.dump({"active_target": str(title_or_num)}, f, indent=2)
+    return {"status": "success", "active_target": str(title_or_num)}
+
+def get_active_target():
+    if os.path.exists(SESSION_CACHE_PATH):
+        try:
+            with open(SESSION_CACHE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("active_target")
+        except Exception:
+            pass
+    return None
+
+def bezier_point(p0, p1, p2, p3, t):
+    u = 1.0 - t
+    tt = t * t
+    uu = u * u
+    uuu = uu * u
+    ttt = tt * t
+    x = uuu * p0[0] + 3 * uu * t * p1[0] + 3 * u * tt * p2[0] + ttt * p3[0]
+    y = uuu * p0[1] + 3 * uu * t * p1[1] + 3 * u * tt * p2[1] + ttt * p3[1]
+    return (int(x), int(y))
+
+def ease_in_out(t):
+    return t * t * (3.0 - 2.0 * t)
 
 COMMON_APPS = {
     "youtube": "com.google.android.youtube",
@@ -169,6 +198,8 @@ def find_target_window(title_or_hwnd=None, prefer_phone=True):
     windows = list_windows()
     if not windows:
         return None
+    if not title_or_hwnd:
+        title_or_hwnd = get_active_target()
     if title_or_hwnd:
         try:
             target_hwnd = int(title_or_hwnd)
@@ -393,7 +424,7 @@ def tap(x, y, target=None, normalized=False):
     with_desktop(worker)
     return {"status": "success", "action": "tap", "coords": [abs_x, abs_y]}
 
-def swipe(x1, y1, x2, y2, target=None, normalized=False, steps=20, duration=0.22):
+def swipe(x1, y1, x2, y2, target=None, normalized=False, steps=22, duration=0.25, human=True):
     win = find_target_window(target, prefer_phone=True)
     if not win:
         raise RuntimeError("Target window not found")
@@ -409,21 +440,32 @@ def swipe(x1, y1, x2, y2, target=None, normalized=False, steps=20, duration=0.22
         start_y = bounds["y"] + int(y1)
         end_x = bounds["x"] + int(x2)
         end_y = bounds["y"] + int(y2)
+
+    if human:
+        import random
+        dev_x = random.uniform(-16, 16)
+        dev_y = random.uniform(-8, 8)
+        p0 = (start_x, start_y)
+        p3 = (end_x, end_y)
+        p1 = (start_x + dev_x, start_y + (end_y - start_y) * 0.35 + dev_y)
+        p2 = (end_x + dev_x * 0.6, end_y - (end_y - start_y) * 0.35)
+        points = [bezier_point(p0, p1, p2, p3, ease_in_out(i / float(steps))) for i in range(1, steps + 1)]
+    else:
+        points = [(int(start_x + (end_x - start_x) * (i / steps)), int(start_y + (end_y - start_y) * (i / steps))) for i in range(1, steps + 1)]
+
     def worker():
         user32.SetCursorPos(start_x, start_y)
         time.sleep(0.03)
         user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
         time.sleep(0.03)
         delay = duration / max(1, steps)
-        for i in range(1, steps + 1):
-            cur_x = int(start_x + (end_x - start_x) * (i / steps))
-            cur_y = int(start_y + (end_y - start_y) * (i / steps))
-            user32.SetCursorPos(cur_x, cur_y)
+        for px, py in points:
+            user32.SetCursorPos(px, py)
             time.sleep(delay)
         time.sleep(0.03)
         user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
     with_desktop(worker)
-    return {"status": "success", "action": "swipe", "from": [start_x, start_y], "to": [end_x, end_y]}
+    return {"status": "success", "action": "swipe", "from": [start_x, start_y], "to": [end_x, end_y], "human_curve": human}
 
 def set_clipboard_text(text):
     text_bytes = (text + '\0').encode('utf-16le')
@@ -633,6 +675,107 @@ def dump_ui_tree():
     return {"status": "success", "xml": res["stdout"]}
 
 # ---------------------------------------------------------
+# ---------------------------------------------------------
+# Automated Compound Recipes (One-Click Flows)
+# ---------------------------------------------------------
+def recipe_youtube_flow(url, click_link=None, skip_ads=True, target=None):
+    """Complete 1-click autonomous YouTube recipe:
+    1. Instant deep link (0.1s)
+    2. Waits for playback & auto-skips any pre-roll ads
+    3. Expands description if click_link requested
+    4. Scrolls and clicks the link via local OCR
+    """
+    start_time = time.time()
+    steps = []
+    
+    # 1. Deep link
+    dl = deep_link(url, target=target)
+    steps.append({"step": "deep-link", "result": dl})
+    time.sleep(1.8)
+    
+    # 2. Skip ads
+    if skip_ads:
+        ad_res = wait_and_click_text("Skip", target=target, timeout=12.0, poll_interval=1.0)
+        if ad_res.get("status") == "success":
+            steps.append({"step": "skip-ad", "result": ad_res})
+    
+    # 3. Dismiss any premium promos
+    dismiss_popups(target=target)
+    
+    # 4. If click_link, expand description and find link
+    if click_link:
+        time.sleep(0.6)
+        more_res = click_text_on_screen("more", target=target)
+        steps.append({"step": "expand-description", "result": more_res})
+        time.sleep(0.8)
+        
+        query = click_link if click_link != "true" else "http"
+        find_res = scroll_find(query, max_swipes=4, click=True, target=target)
+        steps.append({"step": "click-link", "result": find_res})
+        
+    return {
+        "status": "success",
+        "recipe": "youtube-flow",
+        "url": url,
+        "elapsed_seconds": round(time.time() - start_time, 2),
+        "steps": steps
+    }
+
+def recipe_tiktok_feed(videos=5, min_watch=4.0, max_watch=10.0, like_ratio=0.25, target=None):
+    """Autonomous TikTok human-warmup recipe:
+    - Opens TikTok
+    - Watches N videos for realistic random durations
+    - Performs natural Bézier vertical swipes
+    - Randomly double-taps to like based on like_ratio
+    """
+    import random
+    start_time = time.time()
+    open_app("tiktok", target=target)
+    time.sleep(3.0)
+    dismiss_popups(target=target)
+    
+    actions = []
+    for i in range(1, videos + 1):
+        watch_time = round(random.uniform(min_watch, max_watch), 1)
+        time.sleep(watch_time)
+        
+        liked = False
+        if random.random() < like_ratio:
+            tap(0.5, 0.5, target=target, normalized=True)
+            time.sleep(0.08)
+            tap(0.5, 0.5, target=target, normalized=True)
+            liked = True
+            
+        swipe(0.5, 0.78, 0.5, 0.22, target=target, normalized=True, human=True)
+        actions.append({"video_index": i, "watch_seconds": watch_time, "liked": liked})
+        
+    return {
+        "status": "success",
+        "recipe": "tiktok-feed",
+        "videos_watched": videos,
+        "actions": actions,
+        "elapsed_seconds": round(time.time() - start_time, 2)
+    }
+
+def get_system_status():
+    wins = list_windows()
+    active = get_active_target()
+    adb_status = run_adb(["devices"])
+    adb_devices = [line.split("\t")[0] for line in adb_status["stdout"].split("\n") if "\tdevice" in line]
+    
+    phone_wins = [w for w in wins if w["is_phone"]]
+    app_wins = [w for w in wins if not w["is_phone"]]
+    
+    return {
+        "status": "success",
+        "active_profile": active,
+        "total_windows": len(wins),
+        "phone_windows": [{"hwnd": w["hwnd"], "title": w["title"], "rect": w["rect"]} for w in phone_wins],
+        "app_windows": [{"hwnd": w["hwnd"], "title": w["title"], "rect": w["rect"]} for w in app_wins],
+        "adb_connected_devices": adb_devices,
+        "adb_ready": len(adb_devices) > 0
+    }
+
 # CLI Router
 # ---------------------------------------------------------
 def main():
@@ -748,6 +891,28 @@ def main():
     p_adb = subparsers.add_parser("adb", help="Run ADB command via GeeLark's bundled ADB")
     p_adb.add_argument("args", nargs=argparse.REMAINDER, help="Arguments passed to adb")
 
+    # use (set active profile)
+    p_use = subparsers.add_parser("use", help="Set active phone window or profile number")
+    p_use.add_argument("target", help="Profile number, HWND, or window title substring")
+
+    # status
+    subparsers.add_parser("status", help="Get overview of connected phones, active profile, and ADB status")
+
+    # youtube-flow
+    p_yt = subparsers.add_parser("youtube-flow", help="1-Click YouTube recipe: Deep-link, auto-skip ads, click link")
+    p_yt.add_argument("url", help="YouTube video URL")
+    p_yt.add_argument("--click-link", help="Text/domain of link in description to click (e.g. 'http')")
+    p_yt.add_argument("--no-skip-ads", action="store_true", help="Do not wait for or skip pre-roll ads")
+    p_yt.add_argument("--window", "-w", help="Window title substring or HWND")
+
+    # tiktok-feed
+    p_tt = subparsers.add_parser("tiktok-feed", help="1-Click TikTok warmup: Natural Bézier swipes and realistic watch time")
+    p_tt.add_argument("--videos", type=int, default=5, help="Number of videos to watch")
+    p_tt.add_argument("--min-watch", type=float, default=4.0, help="Min seconds per video")
+    p_tt.add_argument("--max-watch", type=float, default=10.0, help="Max seconds per video")
+    p_tt.add_argument("--like-ratio", type=float, default=0.25, help="Probability (0.0 - 1.0) of liking a video")
+    p_tt.add_argument("--window", "-w", help="Window title substring or HWND")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -763,6 +928,22 @@ def main():
                 for w in wins:
                     ptype = "[PHONE]" if w["is_phone"] else "[APP]"
                     print(f"  {ptype} HWND: {w['hwnd']} | Rect: ({w['rect']['left']}, {w['rect']['top']}, {w['rect']['width']}x{w['rect']['height']}) | Title: {w['title']}")
+
+        elif args.command == "use":
+            res = set_active_target(args.target)
+            print(json.dumps(res, indent=2))
+
+        elif args.command == "status":
+            res = get_system_status()
+            print(json.dumps(res, indent=2))
+
+        elif args.command == "youtube-flow":
+            res = recipe_youtube_flow(args.url, click_link=args.click_link, skip_ads=not args.no_skip_ads, target=args.window)
+            print(json.dumps(res, indent=2))
+
+        elif args.command == "tiktok-feed":
+            res = recipe_tiktok_feed(videos=args.videos, min_watch=args.min_watch, max_watch=args.max_watch, like_ratio=args.like_ratio, target=args.window)
+            print(json.dumps(res, indent=2))
 
         elif args.command == "launch-app":
             if os.path.exists(GEELARK_PATH):
