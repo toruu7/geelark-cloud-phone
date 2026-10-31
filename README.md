@@ -13,6 +13,9 @@ Designed according to the open **Agent Skill Standard**, allowing instant instal
 
 ## 🌟 Key Capabilities
 
+- **Batch Actions (`batch-run`)**: Run entire multi-action mobile sequences from a JSON file or inline string in a single execution—eliminating LLM round-trip delays.
+- **Simultaneous Broadcasting (`broadcast`)**: Multicast an action (home key, back key, deep-link, popup dismissal) across **all open cloud phone windows** simultaneously.
+- **Multi-Profile Automation (`batch-profiles`)**: Sequentially process multiple accounts or profiles (`--profiles 1,2,4` or `all`) with a single command.
 - **1-Click High-Level Recipes (`youtube-flow`, `tiktok-feed`)**: Run complex multi-step mobile journeys in a single command (auto-skips ads, expands descriptions, clicks links, or warms up social feeds).
 - **Target Persistence (`use <profile>`)**: Lock onto Profile 4 or any cloud phone once—never repeat `-w` or `--window` again.
 - **Human-like Bézier Gesture Engine (`swipe`)**: Simulates natural human thumb arcs with non-linear velocity easing, making touch interactions undetectable by TikTok/Instagram anti-bot algorithms.
@@ -21,7 +24,7 @@ Designed according to the open **Agent Skill Standard**, allowing instant instal
 - **Set-of-Mark (SoM) Visual Badges (`capture --annotate` & `tap-mark`)**: Overlays numbered badges on interactive elements so LLMs can simply call `tap-mark <id>` without coordinate hallucinations.
 - **Token-Optimized Multimodal Vision (`--low-token`)**: Downsamples high-res screens to save up to 70% in multimodal vision token costs.
 - **Local Windows Native OCR (`ocr_helper.ps1`)**: Zero-dependency OCR powered by Windows 10/11 `Windows.Media.Ocr.OcrEngine` (runs locally in 80ms, $0 token cost).
-- **Anti-Lag & Self-Healing (`wait-stable`, `dismiss-popup`, `recover`)**: Automatically detects render completion, dismisses promotional or obstacle popups (YouTube Premium, cookie modals, permissions), and recovers to home screen on failures.
+- **Fast Obstacle Clearance & Self-Healing (`wait-stable`, `dismiss-popup`, `recover`)**: Single-pass OCR dismissal (15x faster), automatic render stabilization, and emergency recovery to home screen on failures.
 - **n8n & Docker Ready**: Includes a pre-built n8n workflow (`examples/n8n_trigger.json`) and a lightweight HTTP bridge (`scripts/webhook_bridge.py`) for triggering from local Docker containers.
 
 ---
@@ -35,22 +38,32 @@ python scripts/geelark.py use 4
 # 2. Check connected phones, window geometry, and ADB state
 python scripts/geelark.py status
 
-# 3. Complete YouTube video journey in 1 command (plays video, skips ads, clicks link)
+# 3. Execute a complete multi-step batch sequence from a JSON file
+python scripts/geelark.py batch-run examples/sample_batch.json
+
+# 4. Broadcast an action across ALL open phone windows at once
+python scripts/geelark.py broadcast dismiss-popup
+python scripts/geelark.py broadcast key home
+
+# 5. Run a warmup recipe across multiple profiles sequentially
+python scripts/geelark.py batch-profiles --profiles 1,2,4 tiktok-feed 5
+
+# 6. Complete YouTube video journey in 1 command (plays video, skips ads, clicks link)
 python scripts/geelark.py youtube-flow "https://www.youtube.com/watch?v=Bm84BAtOfQw" --click-link "http"
 
-# 4. Human-like TikTok warmup (5 videos, realistic timing, Bézier swipes)
+# 7. Human-like TikTok warmup (5 videos, realistic timing, Bézier swipes)
 python scripts/geelark.py tiktok-feed --videos 5 --like-ratio 0.3
 
-# 5. Capture screen with numbered Set-of-Mark badges
+# 8. Capture screen with numbered Set-of-Mark badges
 python scripts/geelark.py capture --annotate --out state.png
 
-# 6. Tap an element by mark number
+# 9. Tap an element by mark number
 python scripts/geelark.py tap-mark 12
 
-# 7. Collapse virtual keyboard if obscuring buttons
+# 10. Collapse virtual keyboard if obscuring buttons
 python scripts/geelark.py hide-keyboard
 
-# 8. Dismiss any obstacle popups or system modals
+# 11. Dismiss any obstacle popups or system modals in 1 fast pass
 python scripts/geelark.py dismiss-popup
 ```
 

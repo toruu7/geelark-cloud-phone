@@ -169,11 +169,15 @@ def list_windows():
                     buff = ctypes.create_unicode_buffer(length + 1)
                     user32.GetWindowTextW(hwnd, buff, length + 1)
                     title = buff.value
-                    if any(k.lower() in title.lower() for k in ["geelark", "phone", "tiktok"]):
+                    title_l = title.lower()
+                    ignored_apps = ["zen browser", "google chrome", "firefox", "edge", "visual studio code", "vscode", "github", "powershell", "terminal", "sublime", "notepad++"]
+                    if any(ig in title_l for ig in ignored_apps):
+                        return True
+                    if any(k in title_l for k in ["geelark", "phone", "tiktok", "[#"]):
                         r = RECT()
                         user32.GetWindowRect(hwnd, ctypes.byref(r))
                         is_iconic = bool(user32.IsIconic(hwnd))
-                        is_phone = "geelarkphone" in title.lower() or "phone" in title.lower()
+                        is_phone = "geelarkphone" in title_l or "[#" in title_l or ("phone" in title_l and not title_l.startswith("geelark"))
                         windows.append({
                             "hwnd": int(hwnd),
                             "title": title,
@@ -298,9 +302,10 @@ def run_ocr(image_path):
         "-File", OCR_HELPER_PATH,
         "-ImagePath", os.path.abspath(image_path)
     ]
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    res = subprocess.run(cmd, capture_output=True)
     try:
-        return json.loads(res.stdout.strip(), strict=False)
+        stdout_text = res.stdout.decode('utf-8', errors='replace').strip()
+        return json.loads(stdout_text, strict=False)
     except Exception:
         return []
 
@@ -637,11 +642,18 @@ def dismiss_popups(target=None):
         "Not now", "No thanks", "Later", "Cancel", "Close", "Dismiss",
         "Don't allow", "While using the app", "Allow", "OK"
     ]
+    cap = capture_phone(target=target, out_path=os.path.join(SCRIPT_DIR, ".ocr_cap.png"))
+    words = run_ocr(cap["file"])
     for word in common_dismissals:
-        res = find_text_on_screen(word, target=target)
-        if res.get("matches"):
-            click_text_on_screen(word, target=target)
-            return {"status": "success", "dismissed_via": word}
+        word_lower = word.lower()
+        for w in words:
+            if word_lower in w.get("text", "").lower():
+                center_x = w["x"] + (w["w"] / 2)
+                center_y = w["y"] + (w["h"] / 2)
+                norm_x = center_x / cap["size"][0]
+                norm_y = center_y / cap["size"][1]
+                tap(norm_x, norm_y, target=target, normalized=True)
+                return {"status": "success", "dismissed_via": word, "matched_text": w["text"]}
     send_key("back", target=target)
     return {"status": "success", "dismissed_via": "back_key"}
 
@@ -775,6 +787,204 @@ def get_system_status():
         "adb_connected_devices": adb_devices,
         "adb_ready": len(adb_devices) > 0
     }
+
+def execute_batch_steps(steps_data, target=None):
+    """Executes a list of action dicts sequentially on target device.
+    Accepts JSON file path or raw JSON string.
+    """
+    if isinstance(steps_data, str):
+        if os.path.exists(steps_data):
+            with open(steps_data, "r", encoding="utf-8") as f:
+                steps = json.load(f)
+        else:
+            steps = json.loads(steps_data)
+    else:
+        steps = steps_data
+
+    results = []
+    start_time = time.time()
+
+    for idx, step in enumerate(steps, 1):
+        action = step.get("action", "").lower().strip()
+        res = {"step_index": idx, "action": action}
+
+        try:
+            if action == "sleep":
+                dur = float(step.get("duration", step.get("seconds", 1.0)))
+                time.sleep(dur)
+                res["status"] = "success"
+                res["slept"] = dur
+
+            elif action == "tap":
+                res["result"] = tap(step["x"], step["y"], target=target, normalized=step.get("norm", False))
+
+            elif action == "swipe":
+                res["result"] = swipe(
+                    step["x1"], step["y1"], step["x2"], step["y2"],
+                    target=target,
+                    normalized=step.get("norm", False),
+                    steps=step.get("steps", 22),
+                    duration=step.get("duration", 0.25),
+                    human=step.get("human", True)
+                )
+
+            elif action == "type":
+                res["result"] = type_text(step["text"], target=target)
+                if step.get("enter", False):
+                    time.sleep(0.1)
+                    send_key("enter", target=target)
+
+            elif action == "key":
+                res["result"] = send_key(step["name"], target=target)
+
+            elif action == "open-app":
+                res["result"] = open_app(step["name"], target=target)
+
+            elif action == "deep-link":
+                res["result"] = deep_link(step["url"], target=target)
+
+            elif action == "click-text":
+                res["result"] = click_text_on_screen(step["query"], target=target)
+
+            elif action == "wait-text":
+                res["result"] = wait_and_click_text(step["query"], target=target, timeout=step.get("timeout", 30.0))
+
+            elif action == "scroll-find":
+                res["result"] = scroll_find(
+                    step["query"],
+                    max_swipes=step.get("max_swipes", 5),
+                    click=step.get("click", True),
+                    target=target
+                )
+
+            elif action == "dismiss-popup":
+                res["result"] = dismiss_popups(target=target)
+
+            elif action == "hide-keyboard":
+                res["result"] = hide_keyboard(target=target)
+
+            elif action == "wait-stable":
+                res["result"] = wait_screen_stable(target=target, timeout=step.get("timeout", 6.0))
+
+            elif action == "capture":
+                out = step.get("out", f"batch_step_{idx}.png")
+                if step.get("annotate", False):
+                    res["result"] = capture_and_annotate(target=target, out_path=out, low_token=step.get("low_token", False))
+                else:
+                    res["result"] = capture_phone(target=target, out_path=out, low_token=step.get("low_token", False))
+
+            elif action == "youtube-flow":
+                res["result"] = recipe_youtube_flow(step["url"], click_link=step.get("click_link"), skip_ads=step.get("skip_ads", True), target=target)
+
+            elif action == "tiktok-feed":
+                res["result"] = recipe_tiktok_feed(videos=step.get("videos", 5), min_watch=step.get("min_watch", 4.0), max_watch=step.get("max_watch", 10.0), like_ratio=step.get("like_ratio", 0.25), target=target)
+
+            else:
+                res["status"] = "error"
+                res["message"] = f"Unknown action '{action}'"
+
+            if "status" not in res:
+                res["status"] = "success"
+
+        except Exception as e:
+            res["status"] = "error"
+            res["error"] = str(e)
+
+        results.append(res)
+
+    return {
+        "status": "success",
+        "total_steps": len(steps),
+        "elapsed_seconds": round(time.time() - start_time, 2),
+        "steps": results
+    }
+
+def broadcast_action(command_name, command_args):
+    """Executes an action across ALL open cloud phone windows."""
+    wins = list_windows()
+    phones = [w for w in wins if w["is_phone"]]
+    if not phones:
+        return {"status": "error", "message": "No active phone windows found to broadcast to."}
+
+    results = []
+    for p in phones:
+        hwnd = p["hwnd"]
+        focus_window(hwnd)
+        time.sleep(0.1)
+
+        try:
+            if command_name == "tap":
+                r = tap(float(command_args[0]), float(command_args[1]), target=hwnd, normalized="--norm" in command_args)
+            elif command_name == "swipe":
+                r = swipe(float(command_args[0]), float(command_args[1]), float(command_args[2]), float(command_args[3]), target=hwnd, normalized="--norm" in command_args)
+            elif command_name == "key":
+                r = send_key(command_args[0], target=hwnd)
+            elif command_name == "type":
+                r = type_text(" ".join(command_args), target=hwnd)
+            elif command_name == "open-app":
+                r = open_app(command_args[0], target=hwnd)
+            elif command_name == "deep-link":
+                r = deep_link(command_args[0], target=hwnd)
+            elif command_name == "dismiss-popup":
+                r = dismiss_popups(target=hwnd)
+            elif command_name == "hide-keyboard":
+                r = hide_keyboard(target=hwnd)
+            else:
+                r = {"status": "error", "message": f"Command '{command_name}' not supported in broadcast mode"}
+            results.append({"phone": p["title"], "hwnd": hwnd, "result": r})
+        except Exception as e:
+            results.append({"phone": p["title"], "hwnd": hwnd, "error": str(e)})
+
+    return {"status": "success", "broadcast_count": len(phones), "results": results}
+
+def batch_profiles(profiles_input, command_name, command_args):
+    """Runs a command sequentially across specific profile numbers/names."""
+    wins = list_windows()
+    phones = [w for w in wins if w["is_phone"]]
+    if not phones:
+        return {"status": "error", "message": "No open phone windows found."}
+
+    if profiles_input == "all":
+        selected = phones
+    else:
+        profile_keys = [k.strip().lower() for k in profiles_input.split(",")]
+        selected = []
+        for pk in profile_keys:
+            for p in phones:
+                title = p["title"].lower()
+                if pk in title or f"#{pk}" in title:
+                    if p not in selected:
+                        selected.append(p)
+
+    if not selected:
+        return {"status": "error", "message": f"No open phone windows matched profiles: {profiles_input}"}
+
+    results = []
+    for p in selected:
+        hwnd = p["hwnd"]
+        focus_window(hwnd)
+        time.sleep(0.2)
+        try:
+            if command_name == "youtube-flow":
+                r = recipe_youtube_flow(command_args[0], click_link=command_args[1] if len(command_args) > 1 else None, target=hwnd)
+            elif command_name == "tiktok-feed":
+                v_count = int(command_args[0]) if len(command_args) > 0 else 5
+                r = recipe_tiktok_feed(videos=v_count, target=hwnd)
+            elif command_name == "open-app":
+                r = open_app(command_args[0], target=hwnd)
+            elif command_name == "deep-link":
+                r = deep_link(command_args[0], target=hwnd)
+            elif command_name == "dismiss-popup":
+                r = dismiss_popups(target=hwnd)
+            elif command_name == "recover":
+                r = emergency_recover(target=hwnd)
+            else:
+                r = {"status": "error", "message": f"Command '{command_name}' not supported in batch-profiles mode"}
+            results.append({"profile": p["title"], "hwnd": hwnd, "result": r})
+        except Exception as e:
+            results.append({"profile": p["title"], "hwnd": hwnd, "error": str(e)})
+
+    return {"status": "success", "profiles_processed": len(selected), "results": results}
 
 # CLI Router
 # ---------------------------------------------------------
@@ -913,6 +1123,22 @@ def main():
     p_tt.add_argument("--like-ratio", type=float, default=0.25, help="Probability (0.0 - 1.0) of liking a video")
     p_tt.add_argument("--window", "-w", help="Window title substring or HWND")
 
+    # batch-run
+    p_br = subparsers.add_parser("batch-run", help="Run a sequence of actions from a JSON file or JSON string")
+    p_br.add_argument("steps", help="Path to JSON file or raw JSON array of action objects")
+    p_br.add_argument("--window", "-w", help="Window title substring or HWND")
+
+    # broadcast
+    p_bc = subparsers.add_parser("broadcast", help="Broadcast an action across ALL open cloud phones simultaneously")
+    p_bc.add_argument("action", help="Action name (tap, swipe, key, type, open-app, deep-link, dismiss-popup)")
+    p_bc.add_argument("action_args", nargs=argparse.REMAINDER, help="Arguments passed to the action")
+
+    # batch-profiles
+    p_bp = subparsers.add_parser("batch-profiles", help="Run a command sequentially across multiple profiles")
+    p_bp.add_argument("--profiles", "-p", default="all", help="Comma-separated profile numbers/names (e.g. '1,2,4' or 'all')")
+    p_bp.add_argument("command_name", help="Command to run (youtube-flow, tiktok-feed, open-app, deep-link, dismiss-popup, recover)")
+    p_bp.add_argument("command_args", nargs=argparse.REMAINDER, help="Arguments for the command")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -943,6 +1169,18 @@ def main():
 
         elif args.command == "tiktok-feed":
             res = recipe_tiktok_feed(videos=args.videos, min_watch=args.min_watch, max_watch=args.max_watch, like_ratio=args.like_ratio, target=args.window)
+            print(json.dumps(res, indent=2))
+
+        elif args.command == "batch-run":
+            res = execute_batch_steps(args.steps, target=args.window)
+            print(json.dumps(res, indent=2))
+
+        elif args.command == "broadcast":
+            res = broadcast_action(args.action, args.action_args)
+            print(json.dumps(res, indent=2))
+
+        elif args.command == "batch-profiles":
+            res = batch_profiles(args.profiles, args.command_name, args.command_args)
             print(json.dumps(res, indent=2))
 
         elif args.command == "launch-app":

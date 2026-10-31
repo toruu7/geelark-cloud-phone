@@ -18,6 +18,9 @@ To minimize LLM token usage and execution time, use these high-efficiency shortc
 | Goal | Low-Cost / Fast-Path Command | Why It's Faster & Cheaper |
 | :--- | :--- | :--- |
 | **Set Active Profile Once** | `python scripts/geelark.py use 4` | **Zero repetitive flags**: Automatically targets Profile 4 across all commands without `--window`. |
+| **Run Multi-Step Action Lists** | `python scripts/geelark.py batch-run workflow.json` | **Zero LLM round-trip latency**: Executes sequences (taps, swipes, deep links, OCR checks) locally in 1 turn. |
+| **Broadcast Across All Phones** | `python scripts/geelark.py broadcast dismiss-popup` | Multicasts an action (or key/deep-link) to all open phone windows simultaneously. |
+| **Multi-Profile Automation** | `python scripts/geelark.py batch-profiles -p 1,2,4 tiktok-feed 5` | Runs commands or recipes sequentially across multiple profiles in one execution. |
 | **1-Click Full YouTube Automation** | `python scripts/geelark.py youtube-flow "<url>" --click-link "http"` | **1 turn execution**: Deep links, auto-skips ads, expands description, and clicks the link! |
 | **1-Click TikTok Account Warmup** | `python scripts/geelark.py tiktok-feed --videos 5` | **Anti-ban**: Watches 5 videos with realistic pauses and human Bézier gesture curves. |
 | **Open Video or Webpage** | `python scripts/geelark.py deep-link "<url>"` | **0.1s instant dispatch** via Android Intent instead of typing or searching. |
@@ -48,7 +51,41 @@ python scripts/geelark.py status
 python scripts/geelark.py list-windows
 ```
 
-### 2. 1-Click Automated Recipes
+### 2. Batch Actions & Multi-Phone Automation
+```bash
+# Execute a sequence of actions from a JSON file:
+python scripts/geelark.py batch-run examples/sample_batch.json
+
+# Execute an inline JSON batch sequence:
+python scripts/geelark.py batch-run '[{"action":"dismiss-popup"},{"action":"deep-link","url":"https://youtube.com/watch?v=Bm84BAtOfQw"},{"action":"wait-text","query":"Skip"}]'
+
+# Broadcast an action across ALL open phone windows at once:
+python scripts/geelark.py broadcast dismiss-popup
+python scripts/geelark.py broadcast key home
+python scripts/geelark.py broadcast deep-link "https://youtube.com/watch?v=Bm84BAtOfQw"
+
+# Run a command or recipe sequentially across specific profiles or all profiles:
+python scripts/geelark.py batch-profiles --profiles 1,2,4 tiktok-feed 5
+python scripts/geelark.py batch-profiles --profiles all dismiss-popup
+```
+
+#### Supported Batch Actions (`batch-run`):
+- `tap`: `{"action": "tap", "x": 0.5, "y": 0.5, "norm": true}`
+- `swipe`: `{"action": "swipe", "x1": 0.5, "y1": 0.8, "x2": 0.5, "y2": 0.2, "norm": true, "human": true}`
+- `type`: `{"action": "type", "text": "hello", "enter": true}`
+- `key`: `{"action": "key", "name": "home"}`
+- `open-app`: `{"action": "open-app", "name": "youtube"}`
+- `deep-link`: `{"action": "deep-link", "url": "https://..."}`
+- `click-text`: `{"action": "click-text", "query": "Sign in"}`
+- `wait-text`: `{"action": "wait-text", "query": "Skip", "timeout": 15.0}`
+- `scroll-find`: `{"action": "scroll-find", "query": "https://", "max_swipes": 5}`
+- `dismiss-popup`: `{"action": "dismiss-popup"}`
+- `hide-keyboard`: `{"action": "hide-keyboard"}`
+- `wait-stable`: `{"action": "wait-stable", "timeout": 6.0}`
+- `sleep`: `{"action": "sleep", "duration": 1.5}`
+- `capture`: `{"action": "capture", "out": "state.png"}`
+
+### 3. 1-Click Automated Recipes
 ```bash
 # 1-Click YouTube flow (plays video, skips pre-roll ads, expands description, clicks link):
 python scripts/geelark.py youtube-flow "https://www.youtube.com/watch?v=Bm84BAtOfQw" --click-link "http"
@@ -57,7 +94,7 @@ python scripts/geelark.py youtube-flow "https://www.youtube.com/watch?v=Bm84BAtO
 python scripts/geelark.py tiktok-feed --videos 5 --min-watch 4.0 --max-watch 12.0 --like-ratio 0.3
 ```
 
-### 3. Visual Capture & Set-of-Mark (SoM)
+### 4. Visual Capture & Set-of-Mark (SoM)
 ```bash
 # Capture with numbered overlay badges:
 python scripts/geelark.py capture --annotate --out state.png
@@ -69,7 +106,7 @@ python scripts/geelark.py capture --low-token --out state.png
 python scripts/geelark.py tap-mark 12
 ```
 
-### 4. Fast Navigation & App Launching
+### 5. Fast Navigation & App Launching
 ```bash
 # Instant App Launch (youtube, tiktok, chrome, settings):
 python scripts/geelark.py open-app youtube
@@ -78,7 +115,7 @@ python scripts/geelark.py open-app youtube
 python scripts/geelark.py deep-link "https://www.youtube.com/watch?v=Bm84BAtOfQw"
 ```
 
-### 5. Native Windows OCR (`Windows.Media.Ocr`)
+### 6. Native Windows OCR (`Windows.Media.Ocr`)
 ```bash
 # Locate words on screen:
 python scripts/geelark.py find-text "Description"
@@ -93,7 +130,7 @@ python scripts/geelark.py wait-text "Skip" --timeout 30.0
 python scripts/geelark.py scroll-find "ceritypartners.com" --max-swipes 5
 ```
 
-### 6. Input & Natural Human Gestures
+### 7. Input & Natural Human Gestures
 ```bash
 # Tap normalized (0.0 to 1.0):
 python scripts/geelark.py tap 0.5 0.5 --norm
@@ -113,12 +150,12 @@ python scripts/geelark.py key recent
 python scripts/geelark.py hide-keyboard
 ```
 
-### 7. Self-Healing & Failsafes
+### 8. Self-Healing & Failsafes
 ```bash
 # Wait for screen to stop rendering/buffering:
 python scripts/geelark.py wait-stable --timeout 6.0
 
-# Auto-dismiss popups / system modals:
+# Auto-dismiss popups / system modals (Fast single-pass OCR):
 python scripts/geelark.py dismiss-popup
 
 # Emergency recovery to clean home screen:
@@ -148,5 +185,5 @@ python scripts/geelark.py recover
 This skill is fully triggerable from **n8n** (running locally in Docker or on Windows):
 1. For Docker n8n, start the bridge: `python scripts/webhook_bridge.py` (runs on port 5055).
 2. Import `examples/n8n_trigger.json` into n8n.
-3. Call the webhook via HTTP POST with `{"command": "deep-link", "args": ["<url>"]}`.
+3. Call the webhook via HTTP POST with `{"command": "deep-link", "args": ["<url>"]}` or `{"command": "batch-run", "args": ["examples/sample_batch.json"]}`.
 4. See [examples/README.md](examples/README.md) for full setup instructions.

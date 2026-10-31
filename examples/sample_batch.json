@@ -1,0 +1,31 @@
+[
+  {
+    "action": "dismiss-popup"
+  },
+  {
+    "action": "deep-link",
+    "url": "https://www.youtube.com/watch?v=Bm84BAtOfQw"
+  },
+  {
+    "action": "wait-stable",
+    "timeout": 5.0
+  },
+  {
+    "action": "wait-text",
+    "query": "Skip",
+    "timeout": 12.0
+  },
+  {
+    "action": "swipe",
+    "x1": 0.5,
+    "y1": 0.8,
+    "x2": 0.5,
+    "y2": 0.3,
+    "norm": true,
+    "human": true
+  },
+  {
+    "action": "sleep",
+    "duration": 1.0
+  }
+]
