@@ -1,0 +1,105 @@
+{
+  "name": "GeeLark Cloud Phone Automation (Docker & Host Ready)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "geelark-action",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-inbound",
+      "name": "Webhook Inbound",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        200,
+        300
+      ],
+      "webhookId": "geelark-trigger"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:5055/run",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"command\": {{ $json.body.command || 'deep-link' }},\n  \"args\": {{ $json.body.args || ['https://www.youtube.com/watch?v=Bm84BAtOfQw'] }}\n}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "http-docker-bridge",
+      "name": "Trigger via Docker Bridge (Port 5055)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        460,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "command": "=python scripts/geelark.py {{ $json.body.command || 'deep-link' }} {{ ($json.body.args || ['https://www.youtube.com/watch?v=Bm84BAtOfQw']).join(' ') }}"
+      },
+      "id": "execute-cmd-host",
+      "name": "Execute Directly (Host n8n)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        460,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"status\": \"completed\",\n  \"result\": {{ $json }}\n}",
+        "options": {}
+      },
+      "id": "respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        720,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook Inbound": {
+      "main": [
+        [
+          {
+            "node": "Trigger via Docker Bridge (Port 5055)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger via Docker Bridge (Port 5055)": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Directly (Host n8n)": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

@@ -1,0 +1,28 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Temporary captures and marks cache
+*.png
+*.jpg
+*.jpeg
+.ocr_cap.png
+.marks_cache.json
+.temp_*.png
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# OS specific
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.idea/
