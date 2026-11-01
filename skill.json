@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "geelark-cloud-phone",
+  "version": "4.1.0",
+  "description": "Universal Agent Skill to control, automate, and inspect GeeLark cloud phones visually or via ADB with human Bézier curves, Set-of-Mark OCR, and batch multi-phone workflows.",
+  "author": "toruu7",
+  "license": "MIT",
+  "homepage": "https://github.com/toruu7/geelark-cloud-phone#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/toruu7/geelark-cloud-phone.git"
+  },
+  "bugs": {
+    "url": "https://github.com/toruu7/geelark-cloud-phone/issues"
+  },
+  "keywords": [
+    "agent-skill",
+    "geelark",
+    "geelark-automation",
+    "cloud-phone",
+    "cloudphone",
+    "android-automation",
+    "mobile-automation",
+    "mobile-agent",
+    "claude-code",
+    "claude-code-skill",
+    "antigravity",
+    "antigravity-skill",
+    "hermes-agent",
+    "openclaw",
+    "codex",
+    "adb",
+    "windows-ocr",
+    "ocr-automation",
+    "n8n",
+    "n8n-workflow",
+    "set-of-mark",
+    "som",
+    "antidetect",
+    "antidetect-phone",
+    "tiktok-automation",
+    "youtube-automation",
+    "social-media-automation",
+    "bezier-gestures",
+    "bot-detection-bypass",
+    "multimodal-ai"
+  ],
+  "main": "scripts/geelark.py",
+  "engines": {
+    "python": ">=3.8"
+  },
+  "os": [
+    "win32"
+  ]
+}

@@ -22,25 +22,37 @@ import threading
 import ctypes
 import re
 from ctypes import wintypes
-from PIL import Image, ImageChops, ImageDraw
+try:
+    from PIL import Image, ImageChops, ImageDraw
+except ImportError:
+    Image = None
+    ImageChops = None
+    ImageDraw = None
 
 # ---------------------------------------------------------
-# Win32 Definitions & Setup
+# Win32 Definitions & Setup (Safe Multi-Platform Guard)
 # ---------------------------------------------------------
-user32 = ctypes.windll.user32
-gdi32 = ctypes.windll.gdi32
-kernel32 = ctypes.windll.kernel32
+IS_WINDOWS = sys.platform == "win32" and hasattr(ctypes, "windll")
 
-# 64-bit Win32 API signatures for reliable clipboard memory handling
-kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
-kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
-kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
-kernel32.GlobalLock.restype = ctypes.c_void_p
-kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
-user32.OpenClipboard.argtypes = [wintypes.HWND]
-user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
-user32.SetClipboardData.restype = wintypes.HANDLE
-user32.CloseClipboard.argtypes = []
+if IS_WINDOWS:
+    user32 = ctypes.windll.user32
+    gdi32 = ctypes.windll.gdi32
+    kernel32 = ctypes.windll.kernel32
+
+    # 64-bit Win32 API signatures for reliable clipboard memory handling
+    kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+    kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+    user32.SetClipboardData.restype = wintypes.HANDLE
+    user32.CloseClipboard.argtypes = []
+else:
+    user32 = None
+    gdi32 = None
+    kernel32 = None
 
 SRCCOPY = 0x00CC0020
 SM_XVIRTUALSCREEN = 76
@@ -135,6 +147,8 @@ class BITMAPINFOHEADER(ctypes.Structure):
 
 def with_desktop(func):
     """Run a callable on a fresh thread attached to the interactive 'default' desktop."""
+    if not IS_WINDOWS or not user32:
+        raise RuntimeError("Win32 desktop operations are only supported on Windows host.")
     result = [None]
     exception = [None]
     def runner():
@@ -160,6 +174,8 @@ def with_desktop(func):
 # ---------------------------------------------------------
 def list_windows():
     """List all open GeeLark and phone windows with HWND, Rect, and Title."""
+    if not IS_WINDOWS or not user32:
+        return []
     def worker():
         windows = []
         def enum_proc(hwnd, lparam):
@@ -211,15 +227,27 @@ def find_target_window(title_or_hwnd=None, prefer_phone=True):
                 if w["hwnd"] == target_hwnd: return w
         except ValueError:
             pass
-        title_lower = str(title_or_hwnd).lower()
+        title_lower = str(title_or_hwnd).lower().strip()
+        # 1. Exact title or profile pattern match (e.g. #4, profile 4)
         for w in windows:
-            if title_lower in w["title"].lower(): return w
+            w_title = w["title"].lower()
+            if w_title == title_lower:
+                return w
+            if f"#{title_lower}" in w_title or f"profile {title_lower}" in w_title or f"|{title_lower}" in w_title:
+                return w
+        # 2. General substring match
+        for w in windows:
+            if title_lower in w["title"].lower():
+                return w
+        return None
     if prefer_phone:
         for w in windows:
             if w["is_phone"]: return w
     return windows[0]
 
 def focus_window(hwnd):
+    if not IS_WINDOWS or not user32:
+        return False
     def worker():
         user32.keybd_event(VK_MENU, 0, 0, 0)
         user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
@@ -233,6 +261,10 @@ def focus_window(hwnd):
 # Screen Capture & Token Optimization
 # ---------------------------------------------------------
 def capture_rect(x, y, w, h):
+    if not IS_WINDOWS or not user32 or not gdi32:
+        raise RuntimeError("Screen capture is only supported on Windows host.")
+    if Image is None:
+        raise RuntimeError("Pillow is required for image operations. Install with 'pip install pillow'")
     def worker():
         hScreenDC = user32.GetDC(0)
         hMemDC = gdi32.CreateCompatibleDC(hScreenDC)
@@ -262,6 +294,10 @@ def capture_phone(target=None, out_path=None, crop_phone_screen=True, low_token=
     Capture phone window.
     If low_token is True, downsamples the image to ~720p height, saving up to 70% in multimodal token costs.
     """
+    if not IS_WINDOWS or not user32:
+        raise RuntimeError("Screen capture is only supported on Windows host.")
+    if Image is None:
+        raise RuntimeError("Pillow is required for image operations. Install with 'pip install pillow'")
     win = find_target_window(target, prefer_phone=True)
     if not win:
         raise RuntimeError("No GeeLark or Phone window found. Make sure GeeLark is open.")
@@ -364,8 +400,11 @@ def tap_mark(mark_id, target=None):
     """Tap a numbered mark from previous 'capture --annotate'."""
     if not os.path.exists(MARKS_CACHE_PATH):
         return {"status": "error", "message": "No marks cache found. Run 'capture --annotate' first."}
-    with open(MARKS_CACHE_PATH, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        with open(MARKS_CACHE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to read marks cache: {str(e)}"}
     marks = data.get("marks", {})
     mark = marks.get(str(mark_id))
     if not mark:
@@ -377,6 +416,10 @@ def tap_mark(mark_id, target=None):
 # Dynamic Stability & Verification
 # ---------------------------------------------------------
 def wait_screen_stable(target=None, timeout=6.0, poll_interval=0.35, threshold=0.015):
+    if not IS_WINDOWS or not user32:
+        raise RuntimeError("Screen stability check is only supported on Windows host.")
+    if Image is None:
+        raise RuntimeError("Pillow is required for image operations. Install with 'pip install pillow'")
     start_time = time.time()
     last_img = None
     while (time.time() - start_time) < timeout:
@@ -409,6 +452,8 @@ def get_phone_screen_bounds(win):
     return {"x": r["left"], "y": r["top"], "width": r["width"], "height": r["height"]}
 
 def tap(x, y, target=None, normalized=False):
+    if not IS_WINDOWS or not user32:
+        raise RuntimeError("Touch input operations are only supported on Windows host.")
     win = find_target_window(target, prefer_phone=True)
     if not win:
         raise RuntimeError("Target window not found")
@@ -430,6 +475,8 @@ def tap(x, y, target=None, normalized=False):
     return {"status": "success", "action": "tap", "coords": [abs_x, abs_y]}
 
 def swipe(x1, y1, x2, y2, target=None, normalized=False, steps=22, duration=0.25, human=True):
+    if not IS_WINDOWS or not user32:
+        raise RuntimeError("Swipe gesture operations are only supported on Windows host.")
     win = find_target_window(target, prefer_phone=True)
     if not win:
         raise RuntimeError("Target window not found")
@@ -473,6 +520,8 @@ def swipe(x1, y1, x2, y2, target=None, normalized=False, steps=22, duration=0.25
     return {"status": "success", "action": "swipe", "from": [start_x, start_y], "to": [end_x, end_y], "human_curve": human}
 
 def set_clipboard_text(text):
+    if not IS_WINDOWS or not kernel32 or not user32:
+        raise RuntimeError("Clipboard operations are only supported on Windows host.")
     text_bytes = (text + '\0').encode('utf-16le')
     h_mem = kernel32.GlobalAlloc(0x0042, len(text_bytes))
     p_mem = kernel32.GlobalLock(h_mem)
@@ -510,6 +559,8 @@ def send_key(key_name, target=None):
         return tap(0.50, 0.97, target=target, normalized=True)
     elif key_lower in ["recent", "appswitch"]:
         return tap(0.82, 0.97, target=target, normalized=True)
+    if not IS_WINDOWS or not user32:
+        raise RuntimeError("Keyboard key operations are only supported on Windows host.")
     win = find_target_window(target, prefer_phone=True)
     if win: focus_window(win["hwnd"])
     vk_map = {"enter": VK_RETURN, "tab": VK_TAB, "esc": VK_ESCAPE, "backspace": VK_BACK}
@@ -638,7 +689,7 @@ def open_app(app_name, target=None):
 
 def dismiss_popups(target=None):
     common_dismissals = [
-        "Skip Ads", "Skip Ad", "Skip in 5s", "Skip", "Skip trial",
+        "Skip Ads", "Skip Ad", "Skip in 5s", "Skip trial", "Skip",
         "Not now", "No thanks", "Later", "Cancel", "Close", "Dismiss",
         "Don't allow", "While using the app", "Allow", "OK"
     ]
@@ -670,9 +721,12 @@ def emergency_recover(target=None):
 # ---------------------------------------------------------
 # ADB Integration & UI Tree
 # ---------------------------------------------------------
-def run_adb(args):
+def run_adb(args, device=None):
     adb_exe = GEELARK_ADB_PATH if os.path.exists(GEELARK_ADB_PATH) else "adb"
-    cmd = [adb_exe] + args
+    cmd = [adb_exe]
+    if device:
+        cmd.extend(["-s", str(device)])
+    cmd.extend(args)
     res = subprocess.run(cmd, capture_output=True, text=True)
     return {
         "returncode": res.returncode,
@@ -680,8 +734,8 @@ def run_adb(args):
         "stderr": res.stderr.strip()
     }
 
-def dump_ui_tree():
-    res = run_adb(["exec-out", "uiautomator", "dump", "/dev/tty"])
+def dump_ui_tree(device=None):
+    res = run_adb(["exec-out", "uiautomator", "dump", "/dev/tty"], device=device)
     if res["returncode"] != 0 or not res["stdout"]:
         return {"status": "error", "message": "ADB UIAutomator not available."}
     return {"status": "success", "xml": res["stdout"]}
@@ -773,7 +827,7 @@ def get_system_status():
     wins = list_windows()
     active = get_active_target()
     adb_status = run_adb(["devices"])
-    adb_devices = [line.split("\t")[0] for line in adb_status["stdout"].split("\n") if "\tdevice" in line]
+    adb_devices = [line.strip().split("\t")[0].strip() for line in adb_status.get("stdout", "").splitlines() if "\tdevice" in line]
     
     phone_wins = [w for w in wins if w["is_phone"]]
     app_wins = [w for w in wins if not w["is_phone"]]
@@ -790,22 +844,37 @@ def get_system_status():
 
 def execute_batch_steps(steps_data, target=None):
     """Executes a list of action dicts sequentially on target device.
-    Accepts JSON file path or raw JSON string.
+    Accepts JSON file path, raw JSON string, list of dicts, or single dict.
     """
     if isinstance(steps_data, str):
         if os.path.exists(steps_data):
-            with open(steps_data, "r", encoding="utf-8") as f:
-                steps = json.load(f)
+            try:
+                with open(steps_data, "r", encoding="utf-8") as f:
+                    steps = json.load(f)
+            except Exception as e:
+                return {"status": "error", "message": f"Failed to parse batch JSON file: {str(e)}"}
         else:
-            steps = json.loads(steps_data)
-    else:
+            try:
+                steps = json.loads(steps_data)
+            except Exception as e:
+                return {"status": "error", "message": f"Failed to parse batch JSON string: {str(e)}"}
+    elif isinstance(steps_data, dict):
+        steps = [steps_data]
+    elif isinstance(steps_data, list):
         steps = steps_data
+    else:
+        return {"status": "error", "message": f"Invalid steps data type: {type(steps_data).__name__}"}
 
     results = []
     start_time = time.time()
 
     for idx, step in enumerate(steps, 1):
+        if not isinstance(step, dict):
+            results.append({"step_index": idx, "status": "error", "message": f"Step {idx} is not an action object"})
+            continue
+
         action = step.get("action", "").lower().strip()
+        step_target = step.get("window", step.get("target", target))
         res = {"step_index": idx, "action": action}
 
         try:
@@ -816,12 +885,12 @@ def execute_batch_steps(steps_data, target=None):
                 res["slept"] = dur
 
             elif action == "tap":
-                res["result"] = tap(step["x"], step["y"], target=target, normalized=step.get("norm", False))
+                res["result"] = tap(step["x"], step["y"], target=step_target, normalized=step.get("norm", False))
 
             elif action == "swipe":
                 res["result"] = swipe(
                     step["x1"], step["y1"], step["x2"], step["y2"],
-                    target=target,
+                    target=step_target,
                     normalized=step.get("norm", False),
                     steps=step.get("steps", 22),
                     duration=step.get("duration", 0.25),
@@ -829,62 +898,72 @@ def execute_batch_steps(steps_data, target=None):
                 )
 
             elif action == "type":
-                res["result"] = type_text(step["text"], target=target)
+                res["result"] = type_text(step["text"], target=step_target)
                 if step.get("enter", False):
                     time.sleep(0.1)
-                    send_key("enter", target=target)
+                    send_key("enter", target=step_target)
 
             elif action == "key":
-                res["result"] = send_key(step["name"], target=target)
+                key_name = step.get("name", step.get("key", "home"))
+                res["result"] = send_key(key_name, target=step_target)
 
             elif action == "open-app":
-                res["result"] = open_app(step["name"], target=target)
+                app_name = step.get("name", step.get("app", ""))
+                res["result"] = open_app(app_name, target=step_target)
 
             elif action == "deep-link":
-                res["result"] = deep_link(step["url"], target=target)
+                url = step.get("url", step.get("link", ""))
+                res["result"] = deep_link(url, target=step_target)
 
             elif action == "click-text":
-                res["result"] = click_text_on_screen(step["query"], target=target)
+                query = step.get("query", step.get("text", ""))
+                res["result"] = click_text_on_screen(query, target=step_target)
 
             elif action == "wait-text":
-                res["result"] = wait_and_click_text(step["query"], target=target, timeout=step.get("timeout", 30.0))
+                query = step.get("query", step.get("text", ""))
+                res["result"] = wait_and_click_text(query, target=step_target, timeout=step.get("timeout", 30.0))
 
             elif action == "scroll-find":
+                query = step.get("query", step.get("text", ""))
                 res["result"] = scroll_find(
-                    step["query"],
+                    query,
                     max_swipes=step.get("max_swipes", 5),
                     click=step.get("click", True),
-                    target=target
+                    target=step_target
                 )
 
             elif action == "dismiss-popup":
-                res["result"] = dismiss_popups(target=target)
+                res["result"] = dismiss_popups(target=step_target)
 
             elif action == "hide-keyboard":
-                res["result"] = hide_keyboard(target=target)
+                res["result"] = hide_keyboard(target=step_target)
 
             elif action == "wait-stable":
-                res["result"] = wait_screen_stable(target=target, timeout=step.get("timeout", 6.0))
+                res["result"] = wait_screen_stable(target=step_target, timeout=step.get("timeout", 6.0))
 
             elif action == "capture":
                 out = step.get("out", f"batch_step_{idx}.png")
                 if step.get("annotate", False):
-                    res["result"] = capture_and_annotate(target=target, out_path=out, low_token=step.get("low_token", False))
+                    res["result"] = capture_and_annotate(target=step_target, out_path=out, low_token=step.get("low_token", False))
                 else:
-                    res["result"] = capture_phone(target=target, out_path=out, low_token=step.get("low_token", False))
+                    res["result"] = capture_phone(target=step_target, out_path=out, low_token=step.get("low_token", False))
 
             elif action == "youtube-flow":
-                res["result"] = recipe_youtube_flow(step["url"], click_link=step.get("click_link"), skip_ads=step.get("skip_ads", True), target=target)
+                res["result"] = recipe_youtube_flow(step["url"], click_link=step.get("click_link"), skip_ads=step.get("skip_ads", True), target=step_target)
 
             elif action == "tiktok-feed":
-                res["result"] = recipe_tiktok_feed(videos=step.get("videos", 5), min_watch=step.get("min_watch", 4.0), max_watch=step.get("max_watch", 10.0), like_ratio=step.get("like_ratio", 0.25), target=target)
+                res["result"] = recipe_tiktok_feed(videos=step.get("videos", 5), min_watch=step.get("min_watch", 4.0), max_watch=step.get("max_watch", 10.0), like_ratio=step.get("like_ratio", 0.25), target=step_target)
 
             else:
                 res["status"] = "error"
                 res["message"] = f"Unknown action '{action}'"
 
             if "status" not in res:
-                res["status"] = "success"
+                if isinstance(res.get("result"), dict) and res["result"].get("status") == "error":
+                    res["status"] = "error"
+                    res["message"] = res["result"].get("message", "Step failed")
+                else:
+                    res["status"] = "success"
 
         except Exception as e:
             res["status"] = "error"
@@ -899,8 +978,10 @@ def execute_batch_steps(steps_data, target=None):
         "steps": results
     }
 
-def broadcast_action(command_name, command_args):
+def broadcast_action(command_name, command_args=None):
     """Executes an action across ALL open cloud phone windows."""
+    if command_args is None:
+        command_args = []
     wins = list_windows()
     phones = [w for w in wins if w["is_phone"]]
     if not phones:
@@ -914,21 +995,38 @@ def broadcast_action(command_name, command_args):
 
         try:
             if command_name == "tap":
-                r = tap(float(command_args[0]), float(command_args[1]), target=hwnd, normalized="--norm" in command_args)
+                norm = "--norm" in command_args
+                coords = [a for a in command_args if a != "--norm"]
+                if len(coords) < 2:
+                    raise ValueError("Tap broadcast requires x and y coordinates")
+                r = tap(float(coords[0]), float(coords[1]), target=hwnd, normalized=norm)
             elif command_name == "swipe":
-                r = swipe(float(command_args[0]), float(command_args[1]), float(command_args[2]), float(command_args[3]), target=hwnd, normalized="--norm" in command_args)
+                norm = "--norm" in command_args
+                coords = [a for a in command_args if a != "--norm"]
+                if len(coords) < 4:
+                    raise ValueError("Swipe broadcast requires x1, y1, x2, and y2 coordinates")
+                r = swipe(float(coords[0]), float(coords[1]), float(coords[2]), float(coords[3]), target=hwnd, normalized=norm)
             elif command_name == "key":
+                if not command_args:
+                    raise ValueError("Key broadcast requires a key name")
                 r = send_key(command_args[0], target=hwnd)
             elif command_name == "type":
-                r = type_text(" ".join(command_args), target=hwnd)
+                clean_args = [a for a in command_args if a != "--norm"]
+                r = type_text(" ".join(clean_args), target=hwnd)
             elif command_name == "open-app":
+                if not command_args:
+                    raise ValueError("open-app broadcast requires an app name")
                 r = open_app(command_args[0], target=hwnd)
             elif command_name == "deep-link":
+                if not command_args:
+                    raise ValueError("deep-link broadcast requires a URL")
                 r = deep_link(command_args[0], target=hwnd)
             elif command_name == "dismiss-popup":
                 r = dismiss_popups(target=hwnd)
             elif command_name == "hide-keyboard":
                 r = hide_keyboard(target=hwnd)
+            elif command_name == "recover":
+                r = emergency_recover(target=hwnd)
             else:
                 r = {"status": "error", "message": f"Command '{command_name}' not supported in broadcast mode"}
             results.append({"phone": p["title"], "hwnd": hwnd, "result": r})
@@ -937,8 +1035,10 @@ def broadcast_action(command_name, command_args):
 
     return {"status": "success", "broadcast_count": len(phones), "results": results}
 
-def batch_profiles(profiles_input, command_name, command_args):
+def batch_profiles(profiles_input, command_name, command_args=None):
     """Runs a command sequentially across specific profile numbers/names."""
+    if command_args is None:
+        command_args = []
     wins = list_windows()
     phones = [w for w in wins if w["is_phone"]]
     if not phones:
@@ -966,18 +1066,57 @@ def batch_profiles(profiles_input, command_name, command_args):
         time.sleep(0.2)
         try:
             if command_name == "youtube-flow":
+                if not command_args:
+                    raise ValueError("youtube-flow requires a video URL")
                 r = recipe_youtube_flow(command_args[0], click_link=command_args[1] if len(command_args) > 1 else None, target=hwnd)
             elif command_name == "tiktok-feed":
                 v_count = int(command_args[0]) if len(command_args) > 0 else 5
                 r = recipe_tiktok_feed(videos=v_count, target=hwnd)
             elif command_name == "open-app":
+                if not command_args:
+                    raise ValueError("open-app requires an app name")
                 r = open_app(command_args[0], target=hwnd)
             elif command_name == "deep-link":
+                if not command_args:
+                    raise ValueError("deep-link requires a URL")
                 r = deep_link(command_args[0], target=hwnd)
             elif command_name == "dismiss-popup":
                 r = dismiss_popups(target=hwnd)
             elif command_name == "recover":
                 r = emergency_recover(target=hwnd)
+            elif command_name == "key":
+                if not command_args:
+                    raise ValueError("key requires a key name")
+                r = send_key(command_args[0], target=hwnd)
+            elif command_name == "hide-keyboard":
+                r = hide_keyboard(target=hwnd)
+            elif command_name == "tap":
+                norm = "--norm" in command_args
+                coords = [a for a in command_args if a != "--norm"]
+                if len(coords) < 2:
+                    raise ValueError("tap requires x and y coordinates")
+                r = tap(float(coords[0]), float(coords[1]), target=hwnd, normalized=norm)
+            elif command_name == "swipe":
+                norm = "--norm" in command_args
+                coords = [a for a in command_args if a != "--norm"]
+                if len(coords) < 4:
+                    raise ValueError("swipe requires x1, y1, x2, and y2 coordinates")
+                r = swipe(float(coords[0]), float(coords[1]), float(coords[2]), float(coords[3]), target=hwnd, normalized=norm)
+            elif command_name == "type":
+                clean_args = [a for a in command_args if a != "--norm"]
+                r = type_text(" ".join(clean_args), target=hwnd)
+            elif command_name == "batch-run":
+                if not command_args:
+                    raise ValueError("batch-run requires a JSON file path or steps string")
+                r = execute_batch_steps(command_args[0], target=hwnd)
+            elif command_name == "click-text":
+                if not command_args:
+                    raise ValueError("click-text requires a search query")
+                r = click_text_on_screen(command_args[0], target=hwnd)
+            elif command_name == "scroll-find":
+                if not command_args:
+                    raise ValueError("scroll-find requires a search query")
+                r = scroll_find(command_args[0], target=hwnd)
             else:
                 r = {"status": "error", "message": f"Command '{command_name}' not supported in batch-profiles mode"}
             results.append({"profile": p["title"], "hwnd": hwnd, "result": r})
@@ -985,6 +1124,93 @@ def batch_profiles(profiles_input, command_name, command_args):
             results.append({"profile": p["title"], "hwnd": hwnd, "error": str(e)})
 
     return {"status": "success", "profiles_processed": len(selected), "results": results}
+
+def get_feature_manifest():
+    """Returns structured catalog of all capabilities, recipes, batch actions, and configuration."""
+    return {
+        "version": "4.1 Production Edition",
+        "name": "geelark-cloud-phone",
+        "description": "Universal GeeLark cloud phone controller for AI agents and automation orchestrators",
+        "keywords": [
+            "geelark", "cloud-phone", "android-automation", "mobile-agent", "agent-skill",
+            "claude-code", "antigravity", "hermes-agent", "openclaw", "codex", "adb",
+            "ocr", "n8n", "set-of-mark", "antidetect", "tiktok-automation", "youtube-automation",
+            "bezier-gestures", "anti-bot"
+        ],
+        "supported_agents": [
+            "Claude Code",
+            "Hermes Agent",
+            "OpenClaw",
+            "OpenAI Codex",
+            "Google Antigravity"
+        ],
+        "capabilities": {
+            "target_management": {
+                "description": "Lock onto specific cloud phone profiles without repetitive arguments",
+                "commands": ["use", "status", "list-windows", "focus", "launch-app"]
+            },
+            "visual_screen_capture": {
+                "description": "Screen capture with auto-crop, Set-of-Mark numbered badges, and low-token optimization",
+                "commands": ["capture", "tap-mark"],
+                "features": ["--annotate (SoM badges)", "--low-token (~70% vision token reduction)", "auto-crop toolbar/titlebar"]
+            },
+            "touch_gestures_navigation": {
+                "description": "Human-like gesture curves and navigation controls",
+                "commands": ["tap", "swipe", "type", "key", "hide-keyboard"],
+                "features": ["Cubic Bézier curve interpolation with easing", "Normalized coordinates (0.0 to 1.0)", "Clipboard paste injection"]
+            },
+            "windows_native_ocr": {
+                "description": "Zero-dependency local Windows OCR engine for fast, free text recognition",
+                "commands": ["find-text", "click-text", "wait-text", "scroll-find"],
+                "features": ["80ms local execution", "$0 token cost", "Autonomous scroll-find loop"]
+            },
+            "app_launcher_deep_links": {
+                "description": "0.1s instant deep-linking via Android Intents and ADB monkey launching",
+                "commands": ["open-app", "deep-link"],
+                "common_apps": COMMON_APPS
+            },
+            "automated_compound_recipes": {
+                "description": "1-click high-level mobile workflows",
+                "commands": ["youtube-flow", "tiktok-feed"],
+                "features": ["Auto ad skipping", "Description link finder", "Anti-bot randomized watch times & likes"]
+            },
+            "multi_device_orchestration": {
+                "description": "Execute actions across multiple profiles or all devices at once",
+                "commands": ["batch-run", "broadcast", "batch-profiles"]
+            },
+            "self_healing_failsafes": {
+                "description": "Obstacle detection, render stability checking, and emergency recovery",
+                "commands": ["wait-stable", "dismiss-popup", "recover"]
+            },
+            "external_integrations": {
+                "description": "HTTP Webhook bridge and n8n workflows for Docker and orchestrator triggers",
+                "commands": ["webhook_bridge", "n8n-trigger"],
+                "components": ["scripts/webhook_bridge.py", "examples/n8n_trigger.json", "examples/sample_batch.json"]
+            }
+        },
+        "supported_batch_actions": [
+            "tap", "swipe", "type", "key", "open-app", "deep-link",
+            "click-text", "wait-text", "scroll-find", "dismiss-popup",
+            "hide-keyboard", "wait-stable", "sleep", "capture",
+            "youtube-flow", "tiktok-feed"
+        ],
+        "common_apps": COMMON_APPS,
+        "key_mappings": {
+            "back": "Normalized tap (0.18, 0.97) / VK_BACK",
+            "home": "Normalized tap (0.50, 0.97)",
+            "recent / appswitch": "Normalized tap (0.82, 0.97)",
+            "enter": "VK_RETURN (0x0D)",
+            "tab": "VK_TAB (0x09)",
+            "esc": "VK_ESCAPE (0x1B)",
+            "backspace": "VK_BACK (0x08)"
+        },
+        "environment": {
+            "is_windows": IS_WINDOWS,
+            "geelark_exe_path": GEELARK_PATH,
+            "adb_path": GEELARK_ADB_PATH,
+            "active_target": get_active_target()
+        }
+    }
 
 # CLI Router
 # ---------------------------------------------------------
@@ -1105,6 +1331,10 @@ def main():
     p_use = subparsers.add_parser("use", help="Set active phone window or profile number")
     p_use.add_argument("target", help="Profile number, HWND, or window title substring")
 
+    # features
+    p_feat = subparsers.add_parser("features", help="Display full catalog of skill features, capabilities, and batch actions")
+    p_feat.add_argument("--json", action="store_true", help="Output feature catalog in JSON format")
+
     # status
     subparsers.add_parser("status", help="Get overview of connected phones, active profile, and ADB status")
 
@@ -1158,6 +1388,40 @@ def main():
         elif args.command == "use":
             res = set_active_target(args.target)
             print(json.dumps(res, indent=2))
+
+        elif args.command == "features":
+            manifest = get_feature_manifest()
+            if getattr(args, "json", False):
+                print(json.dumps(manifest, indent=2))
+            else:
+                print("=======================================================")
+                print(f"  {manifest['name']} ({manifest['version']})")
+                print("  " + manifest['description'])
+                print("=======================================================")
+                agents_str = ", ".join(manifest["supported_agents"])
+                print(f"Supported Agents: {agents_str}")
+                print()
+                print("Feature Capabilities:")
+                for cat, info in manifest["capabilities"].items():
+                    cat_name = cat.upper().replace("_", " ")
+                    cmds = info.get("commands") or info.get("components", [])
+                    cmd_list = ", ".join(cmds)
+                    print(f"  * {cat_name}:")
+                    print(f"    - Description: {info.get('description', '')}")
+                    print(f"    - Commands / Components: {cmd_list}")
+                batch_str = ", ".join(manifest["supported_batch_actions"])
+                print()
+                print("Supported Batch Actions ('batch-run'):")
+                print(f"  {batch_str}")
+                print()
+                print("Common Android Apps ('open-app'):")
+                for app, pkg in manifest["common_apps"].items():
+                    print(f"  - {app:10s} -> {pkg}")
+                tgt = manifest["environment"]["active_target"] or "None (auto-select)"
+                print()
+                print(f"Active Target Profile: {tgt}")
+                print(f"Platform: {'Windows Host' if manifest['environment']['is_windows'] else 'Non-Windows (Safe CLI/Metadata mode)'}")
+                print("=======================================================")
 
         elif args.command == "status":
             res = get_system_status()

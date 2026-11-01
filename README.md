@@ -1,6 +1,15 @@
 # GeeLark Cloud Phone Automation Skill 📱⚡
 
-A universal **Agent Skill** for controlling and automating **GeeLark cloud phones** visually or via ADB with maximum speed, anti-bot safety, and token efficiency.
+[![Agent Skill](https://img.shields.io/badge/Agent_Skill-Standard_v1.0-blue?style=flat-square&logo=robot)](SKILL.md)
+[![Python](https://img.shields.io/badge/Python-3.8%2B-blue?style=flat-square&logo=python)](https://python.org)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Android-brightgreen?style=flat-square&logo=windows)](SKILL.md)
+[![Compatibility](https://img.shields.io/badge/Compatible-Claude_Code_%7C_Antigravity_%7C_Hermes_%7C_OpenClaw_%7C_Codex-orange?style=flat-square)](INSTALL.md)
+[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
+[![Tests](https://img.shields.io/badge/Tests-54%20Passed-success?style=flat-square)](tests/)
+
+> **`geelark`** · **`cloud-phone`** · **`android-automation`** · **`mobile-agent`** · **`claude-code`** · **`antigravity`** · **`hermes`** · **`openclaw`** · **`adb`** · **`ocr`** · **`n8n`** · **`set-of-mark`** · **`antidetect`**
+
+A universal, production-grade **Agent Skill** for controlling and automating **GeeLark cloud phones** visually or via ADB with maximum speed, anti-bot safety, and token efficiency.
 
 Designed according to the open **Agent Skill Standard**, allowing instant installation across:
 - **Claude Code** (Anthropic)
@@ -13,6 +22,7 @@ Designed according to the open **Agent Skill Standard**, allowing instant instal
 
 ## 🌟 Key Capabilities
 
+- **Feature Introspection (`features`)**: Instantly inspect all capabilities, supported batch actions, common apps, and environment status in human-readable or JSON format.
 - **Batch Actions (`batch-run`)**: Run entire multi-action mobile sequences from a JSON file or inline string in a single execution—eliminating LLM round-trip delays.
 - **Simultaneous Broadcasting (`broadcast`)**: Multicast an action (home key, back key, deep-link, popup dismissal) across **all open cloud phone windows** simultaneously.
 - **Multi-Profile Automation (`batch-profiles`)**: Sequentially process multiple accounts or profiles (`--profiles 1,2,4` or `all`) with a single command.
@@ -32,6 +42,9 @@ Designed according to the open **Agent Skill Standard**, allowing instant instal
 ## 🚀 Quick Usage
 
 ```bash
+# 0. Inspect all capabilities and supported batch actions
+python scripts/geelark.py features
+
 # 1. Lock onto Profile 4 (persists across all subsequent commands)
 python scripts/geelark.py use 4
 
@@ -80,3 +93,32 @@ See [INSTALL.md](INSTALL.md) for 1-minute installation guides for:
 - n8n Local Docker
 
 See [SKILL.md](SKILL.md) for the complete CLI reference, parameter options, and edge case recovery guide.
+See [references/features_and_architecture.md](references/features_and_architecture.md) for deep-dive architecture diagrams, capability specifications, and defensive engineering details.
+See [references/window_specs.md](references/window_specs.md) for window geometry and normalized coordinate maps.
+
+---
+
+## 🧪 Automated Tests
+
+Run the full unit test suite covering Bézier gestures, batch execution, window matching, and webhook handlers:
+```bash
+python -m unittest discover tests
+```
+
+---
+
+## 🏷️ Tags, Topics & Search Keywords
+
+For repository indexing, agent marketplaces, and search engines:
+
+### 📌 GitHub Topics (Copy-Paste into GitHub Repo "About" Settings):
+```text
+geelark, cloud-phone, cloudphone, android-automation, mobile-automation, mobile-agent, agent-skill, claude-code, antigravity, hermes-agent, openclaw, codex, adb, windows-ocr, n8n, set-of-mark, antidetect, tiktok-automation, youtube-automation, anti-bot
+```
+
+### 🔍 Categorized Search Index:
+- **Core Automation**: `geelark`, `geelark-cloud-phone`, `cloud-phone-automation`, `android-automation`, `mobile-automation`, `adb-automation`, `scrcpy-control`, `antidetect-phone`
+- **Agent Ecosystems**: `agent-skill`, `claude-code-skill`, `antigravity-skill`, `hermes-agent-skill`, `openclaw-skill`, `codex-agent`, `ai-agent-tools`, `llm-mobile-control`
+- **Vision & OCR**: `set-of-mark`, `som-prompting`, `windows-media-ocr`, `ocr-automation`, `low-token-vision`, `multimodal-ai`, `screen-analysis`
+- **Multi-Device & Workflows**: `batch-actions`, `multi-phone-broadcast`, `multi-profile-automation`, `n8n-trigger`, `webhook-bridge`, `social-media-automation`
+- **Anti-Bot & Human Simulation**: `bezier-curves`, `natural-gestures`, `anti-bot-bypass`, `tiktok-warmup`, `youtube-automation`

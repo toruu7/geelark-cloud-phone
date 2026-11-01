@@ -48,13 +48,23 @@ class GeeLarkBridgeHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"status": "error", "message": "Endpoint not found. Use POST /run"})
             return
 
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length).decode("utf-8")
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length < 0:
+                content_length = 0
+        except (ValueError, TypeError):
+            content_length = 0
+
+        body = self.rfile.read(content_length).decode("utf-8") if content_length > 0 else ""
         
         try:
             payload = json.loads(body) if body else {}
         except Exception as e:
             self._send_json(400, {"status": "error", "message": f"Invalid JSON body: {str(e)}"})
+            return
+
+        if not isinstance(payload, dict):
+            self._send_json(400, {"status": "error", "message": "JSON body must be an object/dict"})
             return
 
         command = payload.get("command")
@@ -64,11 +74,13 @@ class GeeLarkBridgeHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"status": "error", "message": "Missing 'command' field in request body"})
             return
 
-        cmd = [sys.executable, GEELARK_PY, command]
+        cmd = [sys.executable, GEELARK_PY, str(command)]
         if isinstance(args, list):
             cmd.extend([str(a) for a in args])
         elif isinstance(args, str):
             cmd.extend(args.split())
+        elif isinstance(args, (int, float, bool)):
+            cmd.append(str(args))
 
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=90)

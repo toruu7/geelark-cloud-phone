@@ -1,8 +1,34 @@
 ---
 name: geelark-cloud-phone
 description: Control, automate, and inspect GeeLark cloud phones visually or via ADB. Use to launch profiles, capture phone screens, tap, swipe, type, press navigation buttons, open apps (YouTube, TikTok, Chrome), search videos, skip ads, and click links. Compatible with Claude Code, Hermes, OpenClaw, Codex, and Antigravity.
+tags:
+  - geelark
+  - cloud-phone
+  - android-automation
+  - mobile-automation
+  - mobile-agent
+  - agent-skill
+  - claude-code
+  - antigravity
+  - hermes-agent
+  - openclaw
+  - codex
+  - adb
+  - ocr
+  - n8n
+  - set-of-mark
+  - antidetect
+  - tiktok-automation
+  - youtube-automation
+  - social-media-automation
+  - bot-detection-bypass
 metadata:
   icon: smartphone
+  author: toruu7
+  version: "4.1.0"
+  category: mobile-automation
+  license: MIT
+  repository: https://github.com/toruu7/geelark-cloud-phone
 ---
 
 # GeeLark Cloud Phone Automation Skill (v4.0 Production & Cost-Optimized)
@@ -17,6 +43,7 @@ To minimize LLM token usage and execution time, use these high-efficiency shortc
 
 | Goal | Low-Cost / Fast-Path Command | Why It's Faster & Cheaper |
 | :--- | :--- | :--- |
+| **Inspect All Skill Capabilities** | `python scripts/geelark.py features` | **Zero guesswork**: Full manifest of commands, recipes, batch actions, and configuration. |
 | **Set Active Profile Once** | `python scripts/geelark.py use 4` | **Zero repetitive flags**: Automatically targets Profile 4 across all commands without `--window`. |
 | **Run Multi-Step Action Lists** | `python scripts/geelark.py batch-run workflow.json` | **Zero LLM round-trip latency**: Executes sequences (taps, swipes, deep links, OCR checks) locally in 1 turn. |
 | **Broadcast Across All Phones** | `python scripts/geelark.py broadcast dismiss-popup` | Multicasts an action (or key/deep-link) to all open phone windows simultaneously. |
@@ -41,6 +68,10 @@ python scripts/geelark.py <command> [options]
 
 ### 1. Profile Target Management & Status
 ```bash
+# Inspect all skill capabilities, supported batch actions, and configuration:
+python scripts/geelark.py features
+python scripts/geelark.py features --json
+
 # Set active profile (persists across commands so you never need -w again):
 python scripts/geelark.py use 4
 
@@ -187,3 +218,10 @@ This skill is fully triggerable from **n8n** (running locally in Docker or on Wi
 2. Import `examples/n8n_trigger.json` into n8n.
 3. Call the webhook via HTTP POST with `{"command": "deep-link", "args": ["<url>"]}` or `{"command": "batch-run", "args": ["examples/sample_batch.json"]}`.
 4. See [examples/README.md](examples/README.md) for full setup instructions.
+
+---
+
+## 📚 Technical Documentation & Deep-Dive
+- [references/features_and_architecture.md](references/features_and_architecture.md): Complete architecture diagrams, capabilities catalog, edge case matrices, and defensive engineering specs.
+- [references/window_specs.md](references/window_specs.md): Window geometry specs and normalized touch coordinate reference.
+- [INSTALL.md](INSTALL.md): Installation guide for Claude Code, Hermes, OpenClaw, Codex, Antigravity, and n8n Docker.
