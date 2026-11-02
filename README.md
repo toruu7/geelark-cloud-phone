@@ -3,25 +3,29 @@
 [![Agent Skill](https://img.shields.io/badge/Agent_Skill-Standard_v1.0-blue?style=flat-square&logo=robot)](SKILL.md)
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue?style=flat-square&logo=python)](https://python.org)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Android-brightgreen?style=flat-square&logo=windows)](SKILL.md)
-[![Compatibility](https://img.shields.io/badge/Compatible-Claude_Code_%7C_Antigravity_%7C_Hermes_%7C_OpenClaw_%7C_Codex-orange?style=flat-square)](INSTALL.md)
+[![Compatibility](https://img.shields.io/badge/Compatible-Claude_%7C_Antigravity_%7C_Grok_Bot_%7C_Cursor_%7C_OpenClaw_%7C_Codex-orange?style=flat-square)](INSTALL.md)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-54%20Passed-success?style=flat-square)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-66%20Passed-success?style=flat-square)](tests/)
 
-> **`geelark`** · **`cloud-phone`** · **`android-automation`** · **`mobile-agent`** · **`claude-code`** · **`antigravity`** · **`hermes`** · **`openclaw`** · **`adb`** · **`ocr`** · **`n8n`** · **`set-of-mark`** · **`antidetect`**
+> **`geelark`** · **`cloud-phone`** · **`android-automation`** · **`mobile-agent`** · **`claude-code`** · **`antigravity`** · **`grok-bot`** · **`cursor`** · **`openclaw`** · **`adb`** · **`ocr`** · **`n8n`** · **`set-of-mark`** · **`antidetect`**
 
-A universal, production-grade **Agent Skill** for controlling and automating **GeeLark cloud phones** visually or via ADB with maximum speed, anti-bot safety, and token efficiency.
+A universal, production-grade **Agent Skill & Multi-Protocol Gateway** for controlling and automating **GeeLark cloud phones** visually, via ADB, or via Cloud OpenAPI with automatic **Multi-Path Fallback Routing**, anti-bot Bézier physics, and zero-token local OCR.
 
-Designed according to the open **Agent Skill Standard**, allowing instant installation across:
-- **Claude Code** (Anthropic)
-- **Hermes Agent**
-- **OpenClaw**
-- **OpenAI Codex / Custom Agents**
-- **Google Antigravity**
+### 🌐 Universal Agent Compatibility (Works with ANY AI Agent)
+- **Skill-Native Agents (`SKILL.md`)**: Claude Code, Google Antigravity, Cursor, Windsurf, OpenClaw, Hermes Agent, OpenAI Codex CLI
+- **Local Stdio MCP Agents (`scripts/mcp_stdio.py`)**: Claude Desktop, Cursor MCP, Cline, Roo Code, Zed, OpenCode
+- **Remote Cloud MCP Agents (`/mcp` & `/sse`)**: xAI Grok Bot (`https://x.ai/bot` / `grok.com/connectors`), Devin, Goose
+- **Function-Calling & OpenAPI Agents (`/openapi.json`)**: OpenAI Custom GPTs, LangChain, CrewAI, AutoGen, Dify, Coze
+- **Plain-Text & No-Code Orchestrators (`/prompt` & `/run`)**: n8n, Make, Zapier, Telegram/Discord Bots, Local Ollama LLMs
 
 ---
 
 ## 🌟 Key Capabilities
 
+- **Multi-Path Element Grounding (`smart-click`)**: Automatically cascades through **Path 1: ADB UIAutomator XML Tree** $\rightarrow$ **Path 2: Local Windows Native OCR** $\rightarrow$ **Path 3: Scroll-Find OCR Loop** $\rightarrow$ **Path 4: Normalized Coordinate Anchor**.
+- **Multi-Path Device Lifecycle (`ensure-device`)**: Cascades from **Cached Profile** $\rightarrow$ **Restore Minimized Window** $\rightarrow$ **Auto-Scan Open Phones** $\rightarrow$ **Cloud OpenAPI Remote Boot (`openapi.geelark.com`)** $\rightarrow$ **Desktop App Launch**.
+- **Built-in Plain-Text Semantic Transpiler (`prompt`)**: Translates casual English instructions (e.g. `"watch 5 tiktoks on profile 4"`) directly into compound recipes without needing an LLM schema.
+- **Universal Schema Exporter (`export-schema`)**: Generates ready-to-import tool schemas for `x.ai/bot`, OpenAI Function Calling, MCP, and OpenAPI 3.1.
 - **Feature Introspection (`features`)**: Instantly inspect all capabilities, supported batch actions, common apps, and environment status in human-readable or JSON format.
 - **Batch Actions (`batch-run`)**: Run entire multi-action mobile sequences from a JSON file or inline string in a single execution—eliminating LLM round-trip delays.
 - **Simultaneous Broadcasting (`broadcast`)**: Multicast an action (home key, back key, deep-link, popup dismissal) across **all open cloud phone windows** simultaneously.

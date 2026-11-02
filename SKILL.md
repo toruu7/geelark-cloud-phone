@@ -25,15 +25,15 @@ tags:
 metadata:
   icon: smartphone
   author: toruu7
-  version: "4.1.0"
+  version: "4.2.0"
   category: mobile-automation
   license: MIT
   repository: https://github.com/toruu7/geelark-cloud-phone
 ---
 
-# GeeLark Cloud Phone Automation Skill (v4.0 Production & Cost-Optimized)
+# GeeLark Cloud Phone Automation Skill (v4.2 Universal Agent & Multi-Path Edition)
 
-This skill enables AI agents (**Claude Code, Hermes, OpenClaw, Codex, Antigravity**) to control and automate **GeeLark cloud phones** with maximum time, cost, and token efficiency.
+This skill enables **ANY AI agent** (**Claude Code, Claude Desktop, Antigravity, Cursor, Windsurf, x.ai/bot Grok Bot, OpenClaw, Hermes, OpenAI Codex/Custom GPTs, Cline, Roo Code, LangChain, CrewAI, Dify, n8n**) to control and automate **GeeLark cloud phones** with automatic multi-path fallback routing, zero-token local OCR, and anti-bot Bézier physics.
 
 ---
 
@@ -43,6 +43,10 @@ To minimize LLM token usage and execution time, use these high-efficiency shortc
 
 | Goal | Low-Cost / Fast-Path Command | Why It's Faster & Cheaper |
 | :--- | :--- | :--- |
+| **Plain-Text Natural Instruction** | `python scripts/geelark.py prompt "watch 5 tiktoks on profile 4"` | **Zero schema overhead**: Deterministic local transpiler maps English directly to recipes. |
+| **Multi-Path Smart Click** | `python scripts/geelark.py smart-click "Skip"` | **4-Layer Fallback**: Tries ADB XML UI Tree $\rightarrow$ Local OCR $\rightarrow$ Scroll-Find $\rightarrow$ Anchor. |
+| **Ensure Device Ready** | `python scripts/geelark.py ensure-device -w 4` | **5-Layer Lifecycle**: Cached Window $\rightarrow$ Restore Minimized $\rightarrow$ Scan $\rightarrow$ Cloud API Boot $\rightarrow$ Desktop Launch. |
+| **Export Agent Tool Schemas** | `python scripts/geelark.py export-schema -f xai` | Exports ready-to-import tool schemas for `x.ai/bot`, OpenAI, MCP, and OpenAPI 3.1. |
 | **Inspect All Skill Capabilities** | `python scripts/geelark.py features` | **Zero guesswork**: Full manifest of commands, recipes, batch actions, and configuration. |
 | **Set Active Profile Once** | `python scripts/geelark.py use 4` | **Zero repetitive flags**: Automatically targets Profile 4 across all commands without `--window`. |
 | **Run Multi-Step Action Lists** | `python scripts/geelark.py batch-run workflow.json` | **Zero LLM round-trip latency**: Executes sequences (taps, swipes, deep links, OCR checks) locally in 1 turn. |

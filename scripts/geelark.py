@@ -954,6 +954,14 @@ def execute_batch_steps(steps_data, target=None):
             elif action == "tiktok-feed":
                 res["result"] = recipe_tiktok_feed(videos=step.get("videos", 5), min_watch=step.get("min_watch", 4.0), max_watch=step.get("max_watch", 10.0), like_ratio=step.get("like_ratio", 0.25), target=step_target)
 
+            elif action == "smart-click":
+                query = step.get("query", step.get("text", ""))
+                res["result"] = smart_click(query, target=step_target, scroll_fallback=step.get("scroll", True))
+
+            elif action == "prompt":
+                p_text = step.get("prompt", step.get("text", ""))
+                res["result"] = execute_natural_prompt(p_text, target=step_target)
+
             else:
                 res["status"] = "error"
                 res["message"] = f"Unknown action '{action}'"
@@ -1125,6 +1133,452 @@ def batch_profiles(profiles_input, command_name, command_args=None):
 
     return {"status": "success", "profiles_processed": len(selected), "results": results}
 
+
+# ---------------------------------------------------------
+# Multi-Path Fallback Routing, Cloud API & Natural Language Engine
+# ---------------------------------------------------------
+KNOWN_UI_ANCHORS = {
+    "home": (0.50, 0.97),
+    "back": (0.18, 0.97),
+    "recent": (0.82, 0.97),
+    "appswitch": (0.82, 0.97),
+    "omnibox": (0.50, 0.09),
+    "address bar": (0.50, 0.09),
+    "url bar": (0.50, 0.09),
+    "search bar": (0.50, 0.09),
+    "like": (0.92, 0.52),
+    "heart": (0.92, 0.52),
+    "center": (0.50, 0.50),
+    "play": (0.50, 0.50),
+    "pause": (0.50, 0.50),
+}
+
+def smart_click(query, target=None, scroll_fallback=True):
+    """Multi-Path Fallback Element Grounding & Clicking (inspired by MobileRun & AppAgent v2):
+    Path 1: Structural UI Accessibility Tree (ADB UIAutomator XML bounds)
+    Path 2: Local Windows Native OCR (click_text_on_screen)
+    Path 3: Autonomous Scroll-Find OCR Loop (scroll_find)
+    Path 4: Pre-Calibrated Normalized Coordinate Anchor Fallback
+    """
+    import re
+    paths_tried = []
+    q_clean = str(query).strip()
+    q_lower = q_clean.lower()
+
+    # Path 1: ADB UI Automator Accessibility Tree
+    paths_tried.append("adb_ui_tree")
+    try:
+        ui_res = dump_ui_tree()
+        if ui_res.get("status") == "success" and ui_res.get("xml"):
+            xml_str = ui_res["xml"]
+            node_pattern = re.compile(r'<node[^>]+>', re.IGNORECASE)
+            for node_match in node_pattern.finditer(xml_str):
+                node_tag = node_match.group(0)
+                text_m = re.search(r'text="([^"]*)"', node_tag)
+                desc_m = re.search(r'content-desc="([^"]*)"', node_tag)
+                bounds_m = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', node_tag)
+                node_text = (text_m.group(1) if text_m else "") + " " + (desc_m.group(1) if desc_m else "")
+                if q_lower in node_text.lower() and bounds_m:
+                    x1, y1, x2, y2 = map(int, bounds_m.groups())
+                    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                    adb_tap = run_adb(["shell", "input", "tap", str(cx), str(cy)])
+                    if adb_tap.get("returncode") == 0:
+                        return {
+                            "status": "success",
+                            "action": "smart-click",
+                            "path": "adb_ui_tree",
+                            "matched": node_text.strip(),
+                            "coords": [cx, cy],
+                            "paths_tried": paths_tried
+                        }
+    except Exception:
+        pass
+
+    # Path 2: Local Windows Native OCR
+    paths_tried.append("local_ocr")
+    try:
+        ocr_res = click_text_on_screen(q_clean, target=target)
+        if ocr_res.get("status") == "success":
+            return {
+                "status": "success",
+                "action": "smart-click",
+                "path": "local_ocr",
+                "matched": ocr_res.get("matched", q_clean),
+                "coords": ocr_res.get("coords"),
+                "paths_tried": paths_tried
+            }
+    except Exception:
+        pass
+
+    # Path 3: Autonomous Scroll-Find Loop
+    if scroll_fallback:
+        paths_tried.append("scroll_find_ocr")
+        try:
+            sf_res = scroll_find(q_clean, max_swipes=3, click=True, target=target)
+            if sf_res.get("status") == "success":
+                return {
+                    "status": "success",
+                    "action": "smart-click",
+                    "path": "scroll_find_ocr",
+                    "matched": sf_res.get("matched", q_clean),
+                    "coords": sf_res.get("coords"),
+                    "swipes_performed": sf_res.get("swipes_performed", 0),
+                    "paths_tried": paths_tried
+                }
+        except Exception:
+            pass
+
+    # Path 4: Pre-Calibrated Normalized Coordinate Anchor
+    paths_tried.append("normalized_anchor")
+    if q_lower in KNOWN_UI_ANCHORS:
+        nx, ny = KNOWN_UI_ANCHORS[q_lower]
+        try:
+            tap(nx, ny, target=target, normalized=True)
+            return {
+                "status": "success",
+                "action": "smart-click",
+                "path": "normalized_anchor",
+                "matched": q_lower,
+                "coords": [nx, ny],
+                "paths_tried": paths_tried
+            }
+        except Exception as e:
+            return {"status": "error", "message": f"Anchor tap failed: {str(e)}", "paths_tried": paths_tried}
+
+    return {
+        "status": "error",
+        "action": "smart-click",
+        "message": f"All fallback paths failed to locate element '{q_clean}'",
+        "paths_tried": paths_tried
+    }
+
+def cloud_api_request(endpoint, payload=None, api_token=None):
+    """Hybrid Cloud OpenAPI Client for https://openapi.geelark.com.
+    Automatically attaches UUID v4 traceId and Bearer token.
+    """
+    import uuid
+    import urllib.request
+    import urllib.error
+
+    token = api_token or os.environ.get("GEELARK_API_TOKEN", "").strip()
+    trace_id = str(uuid.uuid4())
+    if not token:
+        return {
+            "status": "error",
+            "code": "missing_api_token",
+            "traceId": trace_id,
+            "message": "GEELARK_API_TOKEN is not set. Set GEELARK_API_TOKEN environment variable or pass --token to use Cloud OpenAPI."
+        }
+
+    url = f"https://openapi.geelark.com{endpoint if endpoint.startswith('/') else '/' + endpoint}"
+    body_bytes = json.dumps(payload or {}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body_bytes,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+            "traceId": trace_id
+        },
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp_data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            return {"status": "success", "traceId": trace_id, "endpoint": endpoint, "response": resp_data}
+    except Exception as e:
+        return {"status": "error", "traceId": trace_id, "endpoint": endpoint, "message": str(e)}
+
+def ensure_device_ready(target=None, auto_boot=True):
+    """Multi-Path Device Lifecycle Resolver:
+    Path 1: Active / Cached Phone Window
+    Path 2: Restore Minimized Phone Window
+    Path 3: Auto-Scan Any Open Phone Window
+    Path 4: Cloud OpenAPI Remote Boot (openapi.geelark.com)
+    Path 5: Local GeeLark Desktop App Launch
+    """
+    paths_tried = []
+    eff_target = target or get_active_target()
+
+    # Path 1 & 2: Check target window
+    paths_tried.append("cached_or_target_window")
+    win = find_target_window(eff_target, prefer_phone=True)
+    if win:
+        if win.get("minimized"):
+            paths_tried.append("restore_minimized_window")
+            try:
+                focus_window(win["hwnd"])
+            except Exception:
+                pass
+            return {"status": "ready", "path": "restore_minimized_window", "window": win, "paths_tried": paths_tried}
+        return {"status": "ready", "path": "cached_or_target_window", "window": win, "paths_tried": paths_tried}
+
+    # Path 3: Auto-scan any open phone window
+    paths_tried.append("auto_discover_open_phone")
+    wins = list_windows()
+    phones = [w for w in wins if w.get("is_phone")]
+    if phones:
+        return {"status": "ready", "path": "auto_discover_open_phone", "window": phones[0], "paths_tried": paths_tried}
+
+    if not auto_boot:
+        return {"status": "error", "message": "No open phone window found and auto_boot is disabled", "paths_tried": paths_tried}
+
+    # Path 4: Cloud OpenAPI Remote Boot
+    if os.environ.get("GEELARK_API_TOKEN"):
+        paths_tried.append("cloud_openapi_boot")
+        c_res = cloud_api_request("/open/v1/phone/start", {"ids": [str(eff_target or "1")]})
+        if c_res.get("status") == "success":
+            return {"status": "booting", "path": "cloud_openapi_boot", "cloud_result": c_res, "paths_tried": paths_tried}
+
+    # Path 5: Local Desktop App Launch
+    paths_tried.append("local_desktop_launch")
+    if os.path.exists(GEELARK_PATH):
+        try:
+            subprocess.Popen([GEELARK_PATH])
+            return {"status": "launching_desktop", "path": "local_desktop_launch", "executable": GEELARK_PATH, "paths_tried": paths_tried}
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to launch GeeLark desktop: {str(e)}", "paths_tried": paths_tried}
+
+    return {"status": "error", "message": "Device unavailable across all lifecycle paths", "paths_tried": paths_tried}
+
+def execute_natural_prompt(prompt_text, target=None):
+    """Built-in Plain-Text Semantic Intent Transpiler:
+    Translates casual natural language prompts (from x.ai/bot, Telegram, small LLMs, or humans)
+    into deterministic GeeLark recipes, batch steps, or multi-path actions.
+    """
+    import re
+    if not prompt_text or not str(prompt_text).strip():
+        return {"status": "error", "message": "Empty prompt provided"}
+
+    raw = str(prompt_text).strip()
+    low = raw.lower()
+
+    # 1. Extract profile / phone number if mentioned (e.g., "on profile 4", "phone #2")
+    prof_match = re.search(r'(?:profile|phone|window|#)\s*(\d+)', low)
+    eff_target = target
+    profile_locked = None
+    if prof_match:
+        profile_locked = prof_match.group(1)
+        eff_target = profile_locked
+        set_active_target(profile_locked)
+
+    # 2. Extract URL if present
+    url_match = re.search(r"(https?://[^\s\"'<>]+)", raw)
+    extracted_url = url_match.group(1) if url_match else None
+
+    # 3. Route by semantic intent
+    # Case A: TikTok Warmup / Feed
+    if "tiktok" in low and any(w in low for w in ["watch", "feed", "warm", "video", "scroll", "swipe", "like"]):
+        vid_match = re.search(r'(\d+)\s*(?:tiktok|video|vid|clip)', low)
+        videos = int(vid_match.group(1)) if vid_match else 5
+        like_ratio = 0.5 if "like" in low else 0.25
+        res = recipe_tiktok_feed(videos=videos, like_ratio=like_ratio, target=eff_target)
+        return {"status": "success", "transpiled_intent": "tiktok-feed", "profile": eff_target, "result": res}
+
+    # Case B: YouTube Flow
+    if ("youtube" in low or (extracted_url and ("youtube.com" in extracted_url or "youtu.be" in extracted_url))):
+        url = extracted_url or "https://www.youtube.com"
+        click_link = "http" if any(w in low for w in ["link", "description", "desc"]) else None
+        res = recipe_youtube_flow(url, click_link=click_link, skip_ads=True, target=eff_target)
+        return {"status": "success", "transpiled_intent": "youtube-flow", "profile": eff_target, "result": res}
+
+    # Case C: Direct URL Deep-Link
+    if extracted_url:
+        res = deep_link(extracted_url, target=eff_target)
+        return {"status": "success", "transpiled_intent": "deep-link", "profile": eff_target, "result": res}
+
+    # Case D: Dismiss Popups / Skip Ads
+    if any(w in low for w in ["dismiss", "popup", "pop-up", "skip ad", "close ad", "modal"]):
+        if "all" in low or "every" in low or "broadcast" in low:
+            res = broadcast_action("dismiss-popup", [])
+            return {"status": "success", "transpiled_intent": "broadcast:dismiss-popup", "result": res}
+        res = dismiss_popups(target=eff_target)
+        return {"status": "success", "transpiled_intent": "dismiss-popup", "profile": eff_target, "result": res}
+
+    # Case E: Status Check
+    if any(w in low for w in ["status", "what is open", "connected", "list window", "check phone"]):
+        res = get_system_status()
+        return {"status": "success", "transpiled_intent": "status", "result": res}
+
+    # Case F: Emergency Recover
+    if any(w in low for w in ["recover", "emergency", "reset phone", "clean home"]):
+        res = emergency_recover(target=eff_target)
+        return {"status": "success", "transpiled_intent": "recover", "profile": eff_target, "result": res}
+
+    # Case G: Navigation Keys (Home, Back, Keyboard)
+    if "hide keyboard" in low or "close keyboard" in low:
+        res = hide_keyboard(target=eff_target)
+        return {"status": "success", "transpiled_intent": "hide-keyboard", "profile": eff_target, "result": res}
+    if any(w in low for w in ["go home", "home screen", "press home"]):
+        res = send_key("home", target=eff_target)
+        return {"status": "success", "transpiled_intent": "key:home", "profile": eff_target, "result": res}
+    if any(w in low for w in ["go back", "press back"]):
+        res = send_key("back", target=eff_target)
+        return {"status": "success", "transpiled_intent": "key:back", "profile": eff_target, "result": res}
+
+    # Case H: Open App
+    app_match = re.search(r'\b(?:open|launch|start)\s+(youtube|tiktok|chrome|settings|playstore|files)\b', low)
+    if app_match:
+        app_name = app_match.group(1)
+        res = open_app(app_name, target=eff_target)
+        return {"status": "success", "transpiled_intent": f"open-app:{app_name}", "profile": eff_target, "result": res}
+
+    # Case I: Type Text
+    type_match = re.search(r"(?:type|write|input|search\s+for)\s+[\"']?([^\"']+)[\"']?", raw, re.IGNORECASE)
+    if type_match:
+        txt = type_match.group(1).strip()
+        res = type_text(txt, target=eff_target)
+        if "enter" in low or "search" in low or "submit" in low:
+            send_key("enter", target=eff_target)
+        return {"status": "success", "transpiled_intent": "type", "text": txt, "profile": eff_target, "result": res}
+
+    # Case J: Click / Tap Element by Name (Smart Multi-Path Click)
+    click_match = re.search(r"(?:click|tap|press|select)\s+(?:on\s+)?[\"']?([^\"']+)[\"']?", raw, re.IGNORECASE)
+    if click_match:
+        query = click_match.group(1).strip()
+        res = smart_click(query, target=eff_target)
+        return {"status": "success" if res.get("status") == "success" else "error", "transpiled_intent": "smart-click", "query": query, "profile": eff_target, "result": res}
+
+    # Case K: Only profile switch requested ("use profile 4", "switch to phone 4")
+    if profile_locked:
+        return {"status": "success", "transpiled_intent": "use", "active_profile": profile_locked}
+
+    # Default Fallback: Try smart_click with the raw query
+    res = smart_click(raw, target=eff_target, scroll_fallback=False)
+    return {
+        "status": res.get("status", "error"),
+        "transpiled_intent": "fallback_smart_click",
+        "query": raw,
+        "profile": eff_target,
+        "result": res
+    }
+
+def export_agent_schemas(fmt="all", server_url="http://localhost:5055"):
+    """Exports universal tool schemas for ANY agent ecosystem:
+    - OpenAI / xAI (Grok Bot) Function Calling tools array
+    - Model Context Protocol (MCP) tools/list schema
+    - OpenAPI 3.1.0 specification (Custom GPTs, Dify, Coze, LangChain)
+    """
+    mcp_tools = [
+        {
+            "name": "geelark_prompt",
+            "description": "Control GeeLark cloud phone using plain natural language instructions (e.g., 'watch 5 tiktoks on profile 4', 'open youtube link and skip ads', 'dismiss popups on all phones').",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Plain text instruction to execute on the cloud phone."},
+                    "window": {"type": "string", "description": "Optional target profile number or window title."}
+                },
+                "required": ["prompt"]
+            }
+        },
+        {
+            "name": "geelark_smart_click",
+            "description": "Multi-path element clicker: tries ADB UI tree bounds -> Local Windows OCR -> Scroll-Find loop -> Normalized anchor fallback.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Text label, content description, or anchor name (e.g. 'Skip', 'Search', 'home')."},
+                    "window": {"type": "string", "description": "Optional target profile number."}
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "geelark_command",
+            "description": "Execute any GeeLark CLI command or compound recipe (use, status, youtube-flow, tiktok-feed, batch-run, broadcast, deep-link, dismiss-popup, recover).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "enum": ["use", "status", "youtube-flow", "tiktok-feed", "batch-run", "broadcast", "batch-profiles", "deep-link", "open-app", "smart-click", "click-text", "scroll-find", "dismiss-popup", "hide-keyboard", "recover", "capture"],
+                        "description": "Command or recipe name."
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Arguments for the command."
+                    }
+                },
+                "required": ["command"]
+            }
+        }
+    ]
+
+    openai_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["inputSchema"]
+            }
+        }
+        for t in mcp_tools
+    ]
+
+    openapi_spec = {
+        "openapi": "3.1.0",
+        "info": {
+            "title": "GeeLark Cloud Phone Universal Agent Gateway",
+            "version": "4.2.0",
+            "description": "Universal REST, Webhook, and Remote MCP gateway for controlling GeeLark cloud phones from x.ai/bot (Grok), OpenAI Custom GPTs, Claude, n8n, Dify, CrewAI, and LangChain."
+        },
+        "servers": [{"url": server_url}],
+        "paths": {
+            "/prompt": {
+                "post": {
+                    "operationId": "geelarkPrompt",
+                    "summary": "Execute plain-text natural language phone instruction",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": mcp_tools[0]["inputSchema"]
+                            }
+                        }
+                    },
+                    "responses": {"200": {"description": "Execution result"}}
+                }
+            },
+            "/run": {
+                "post": {
+                    "operationId": "geelarkRunCommand",
+                    "summary": "Execute structured GeeLark CLI command or recipe",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": mcp_tools[2]["inputSchema"]
+                            }
+                        }
+                    },
+                    "responses": {"200": {"description": "Command output"}}
+                }
+            },
+            "/mcp": {
+                "post": {
+                    "operationId": "geelarkMcpJsonRpc",
+                    "summary": "Model Context Protocol (MCP) JSON-RPC 2.0 endpoint",
+                    "responses": {"200": {"description": "JSON-RPC 2.0 response"}}
+                }
+            }
+        }
+    }
+
+    if fmt in ["openai", "xai"]:
+        return {"format": fmt, "tools": openai_tools}
+    elif fmt == "mcp":
+        return {"format": "mcp", "tools": mcp_tools}
+    elif fmt == "openapi":
+        return openapi_spec
+    return {
+        "openai_xai_tools": openai_tools,
+        "mcp_tools": mcp_tools,
+        "openapi_3_1": openapi_spec
+    }
+
 def get_feature_manifest():
     """Returns structured catalog of all capabilities, recipes, batch actions, and configuration."""
     return {
@@ -1138,11 +1592,15 @@ def get_feature_manifest():
             "bezier-gestures", "anti-bot"
         ],
         "supported_agents": [
-            "Claude Code",
-            "Hermes Agent",
-            "OpenClaw",
-            "OpenAI Codex",
-            "Google Antigravity"
+            "Claude Code & Claude Desktop (SKILL.md + MCP)",
+            "Google Antigravity (SKILL.md + MCP)",
+            "xAI Grok Bot / https://x.ai/bot (Remote MCP + OpenAPI + Plain-Text Prompt)",
+            "Cursor & Windsurf (SKILL.md + Stdio/Remote MCP)",
+            "OpenClaw & Hermes Agent (SKILL.md + CLI)",
+            "OpenAI Codex & Custom GPTs (SKILL.md + OpenAPI 3.1)",
+            "Cline, Roo Code & Zed (Stdio MCP)",
+            "LangChain, CrewAI, AutoGen, Dify & Coze (OpenAPI + Function Calling)",
+            "n8n, Make, Zapier & Telegram/Discord Bots (Webhook /prompt & /run)"
         ],
         "capabilities": {
             "target_management": {
@@ -1190,9 +1648,9 @@ def get_feature_manifest():
         },
         "supported_batch_actions": [
             "tap", "swipe", "type", "key", "open-app", "deep-link",
-            "click-text", "wait-text", "scroll-find", "dismiss-popup",
-            "hide-keyboard", "wait-stable", "sleep", "capture",
-            "youtube-flow", "tiktok-feed"
+            "smart-click", "click-text", "wait-text", "scroll-find",
+            "dismiss-popup", "hide-keyboard", "wait-stable", "sleep",
+            "capture", "youtube-flow", "tiktok-feed", "prompt"
         ],
         "common_apps": COMMON_APPS,
         "key_mappings": {
@@ -1369,6 +1827,39 @@ def main():
     p_bp.add_argument("command_name", help="Command to run (youtube-flow, tiktok-feed, open-app, deep-link, dismiss-popup, recover)")
     p_bp.add_argument("command_args", nargs=argparse.REMAINDER, help="Arguments for the command")
 
+    # smart-click (Multi-path element grounding)
+    p_sc = subparsers.add_parser("smart-click", help="Multi-path element clicker (ADB XML Tree -> Local OCR -> Scroll-Find -> Anchor)")
+    p_sc.add_argument("query", help="Element text, content-desc, or anchor name")
+    p_sc.add_argument("--no-scroll", action="store_true", help="Disable scroll-find fallback")
+    p_sc.add_argument("--window", "-w", help="Window title substring or HWND")
+
+    # ensure-device (Multi-path lifecycle resolver)
+    p_ed = subparsers.add_parser("ensure-device", help="Multi-path device readiness resolver (Active -> Restore -> Scan -> Cloud Boot -> Desktop Launch)")
+    p_ed.add_argument("--window", "-w", help="Target profile number or window title")
+    p_ed.add_argument("--no-boot", action="store_true", help="Do not attempt auto-boot/launch if window is closed")
+
+    # prompt (Built-in plain-text semantic intent transpiler)
+    p_pr = subparsers.add_parser("prompt", help="Execute a plain-text natural language instruction deterministically")
+    p_pr.add_argument("text", help="Plain text instruction (e.g. 'watch 5 tiktoks on profile 4')")
+    p_pr.add_argument("--window", "-w", help="Optional target profile override")
+
+    # export-schema (Universal agent schema exporter)
+    p_es = subparsers.add_parser("export-schema", help="Export tool schemas for OpenAI, xAI Grok Bot, MCP, or OpenAPI 3.1")
+    p_es.add_argument("--format", "-f", choices=["all", "openai", "xai", "mcp", "openapi"], default="all", help="Schema format")
+    p_es.add_argument("--server-url", default="http://localhost:5055", help="Base URL for OpenAPI spec")
+
+    # cloud-list / cloud-start / cloud-stop (Hybrid Cloud OpenAPI)
+    p_cl = subparsers.add_parser("cloud-list", help="List cloud phones via GeeLark Cloud OpenAPI")
+    p_cl.add_argument("--token", help="GeeLark API Bearer token (or set GEELARK_API_TOKEN)")
+
+    p_cstart = subparsers.add_parser("cloud-start", help="Remotely start a cloud phone profile via GeeLark OpenAPI")
+    p_cstart.add_argument("profile_id", help="Cloud phone profile ID")
+    p_cstart.add_argument("--token", help="GeeLark API Bearer token")
+
+    p_cstop = subparsers.add_parser("cloud-stop", help="Remotely stop a cloud phone profile via GeeLark OpenAPI")
+    p_cstop.add_argument("profile_id", help="Cloud phone profile ID")
+    p_cstop.add_argument("--token", help="GeeLark API Bearer token")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -1538,6 +2029,34 @@ def main():
 
         elif args.command == "recover":
             res = emergency_recover(target=args.window)
+            print(json.dumps(res, indent=2))
+
+        elif args.command == "smart-click":
+            res = smart_click(args.query, target=args.window, scroll_fallback=not args.no_scroll)
+            print(json.dumps(res, indent=2))
+
+        elif args.command == "ensure-device":
+            res = ensure_device_ready(target=args.window, auto_boot=not args.no_boot)
+            print(json.dumps(res, indent=2))
+
+        elif args.command == "prompt":
+            res = execute_natural_prompt(args.text, target=args.window)
+            print(json.dumps(res, indent=2))
+
+        elif args.command == "export-schema":
+            res = export_agent_schemas(fmt=args.format, server_url=args.server_url)
+            print(json.dumps(res, indent=2))
+
+        elif args.command == "cloud-list":
+            res = cloud_api_request("/open/v1/phone/list", {"page": 1, "pageSize": 100}, api_token=args.token)
+            print(json.dumps(res, indent=2))
+
+        elif args.command == "cloud-start":
+            res = cloud_api_request("/open/v1/phone/start", {"ids": [args.profile_id]}, api_token=args.token)
+            print(json.dumps(res, indent=2))
+
+        elif args.command == "cloud-stop":
+            res = cloud_api_request("/open/v1/phone/stop", {"ids": [args.profile_id]}, api_token=args.token)
             print(json.dumps(res, indent=2))
 
         elif args.command == "adb":

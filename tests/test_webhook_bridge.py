@@ -252,6 +252,67 @@ class TestWebhookBridge(unittest.TestCase):
             self.assertEqual(output["status"], "error")
             self.assertIn("Fork failed", output["message"])
 
+    def test_get_openapi_spec_endpoint(self):
+        """Verify GET /openapi.json returns OpenAPI 3.1.0 schema."""
+        handler = self._create_handler("GET", "/openapi.json", headers={"Host": "localhost:5055"})
+        handler.do_GET()
+
+        handler.send_response.assert_called_with(200)
+        output = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(output["openapi"], "3.1.0")
+        self.assertIn("/prompt", output["paths"])
+        self.assertIn("/mcp", output["paths"])
+
+    def test_get_mcp_sse_discovery_endpoint(self):
+        """Verify GET /sse returns Remote MCP capability and tools manifest."""
+        handler = self._create_handler("GET", "/sse")
+        handler.do_GET()
+
+        handler.send_response.assert_called_with(200)
+        output = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(output["protocol"], "mcp")
+        self.assertEqual(len(output["tools"]), 3)
+
+    def test_post_prompt_endpoint(self):
+        """Verify POST /prompt forwards natural language instruction to geelark.py prompt."""
+        handler = self._create_handler("POST", "/prompt", body={"prompt": "watch 3 tiktoks on profile 4", "window": "4"})
+        mock_proc = MagicMock(returncode=0, stdout=json.dumps({"status": "success", "transpiled_intent": "tiktok-feed"}), stderr="")
+
+        with patch("subprocess.run", return_value=mock_proc) as mock_run:
+            handler.do_POST()
+            handler.send_response.assert_called_with(200)
+            called_cmd = mock_run.call_args[0][0]
+            self.assertEqual(called_cmd[2], "prompt")
+            self.assertEqual(called_cmd[3], "watch 3 tiktoks on profile 4")
+
+    def test_post_mcp_jsonrpc_protocol(self):
+        """Verify POST /mcp handles initialize, tools/list, and tools/call JSON-RPC 2.0 requests."""
+        # 1. initialize
+        h_init = self._create_handler("POST", "/mcp", body={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        h_init.do_POST()
+        out_init = json.loads(h_init.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(out_init["result"]["serverInfo"]["name"], "geelark-cloud-phone")
+
+        # 2. tools/list
+        h_list = self._create_handler("POST", "/mcp", body={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        h_list.do_POST()
+        out_list = json.loads(h_list.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(len(out_list["result"]["tools"]), 3)
+
+        # 3. tools/call (geelark_prompt)
+        h_call = self._create_handler("POST", "/mcp", body={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "geelark_prompt", "arguments": {"prompt": "dismiss popups"}}
+        })
+        mock_proc = MagicMock(returncode=0, stdout=json.dumps({"status": "success"}), stderr="")
+        with patch("subprocess.run", return_value=mock_proc):
+            h_call.do_POST()
+            out_call = json.loads(h_call.wfile.getvalue().decode("utf-8"))
+            self.assertFalse(out_call["result"]["isError"])
+            self.assertIn("success", out_call["result"]["content"][0]["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

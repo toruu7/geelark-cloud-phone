@@ -695,5 +695,117 @@ class TestGeeLarkRecipesAndCLI(unittest.TestCase):
                 self.assertIn("Supported Batch Actions", all_prints)
 
 
+class TestMultiPathAndUniversalAgents(unittest.TestCase):
+    """Tests for multi-path fallback routing (smart_click, ensure_device_ready),
+    natural language prompt transpilation, Cloud OpenAPI client, and schema exports.
+    """
+
+    def test_smart_click_path1_adb_ui_tree(self):
+        """smart_click succeeds via Path 1 (ADB UIAutomator XML bounds) when node matches."""
+        sample_xml = '<hierarchy><node text="Skip Ad" content-desc="" bounds="[800,900][1000,980]" /></hierarchy>'
+        with patch.object(geelark, "dump_ui_tree", return_value={"status": "success", "xml": sample_xml}):
+            with patch.object(geelark, "run_adb", return_value={"returncode": 0, "stdout": "", "stderr": ""}) as mock_adb:
+                res = geelark.smart_click("Skip")
+                self.assertEqual(res["status"], "success")
+                self.assertEqual(res["path"], "adb_ui_tree")
+                self.assertEqual(res["coords"], [900, 940])
+                mock_adb.assert_called_once_with(["shell", "input", "tap", "900", "940"])
+
+    def test_smart_click_path2_local_ocr_fallback(self):
+        """smart_click falls back to Path 2 (Local OCR) when ADB UI tree is unavailable."""
+        with patch.object(geelark, "dump_ui_tree", return_value={"status": "error"}):
+            with patch.object(geelark, "click_text_on_screen", return_value={"status": "success", "matched": "Subscribe", "coords": [0.5, 0.4]}):
+                res = geelark.smart_click("Subscribe")
+                self.assertEqual(res["status"], "success")
+                self.assertEqual(res["path"], "local_ocr")
+                self.assertEqual(res["paths_tried"], ["adb_ui_tree", "local_ocr"])
+
+    def test_smart_click_path3_scroll_find_fallback(self):
+        """smart_click falls back to Path 3 (Scroll-Find OCR) when static OCR fails."""
+        with patch.object(geelark, "dump_ui_tree", return_value={"status": "error"}):
+            with patch.object(geelark, "click_text_on_screen", return_value={"status": "error"}):
+                with patch.object(geelark, "scroll_find", return_value={"status": "success", "matched": "ceritypartners.com", "coords": [0.4, 0.6], "swipes_performed": 2}):
+                    res = geelark.smart_click("ceritypartners.com", scroll_fallback=True)
+                    self.assertEqual(res["status"], "success")
+                    self.assertEqual(res["path"], "scroll_find_ocr")
+                    self.assertEqual(res["swipes_performed"], 2)
+
+    def test_smart_click_path4_normalized_anchor_fallback(self):
+        """smart_click falls back to Path 4 (Normalized Anchor) for known system elements."""
+        with patch.object(geelark, "dump_ui_tree", return_value={"status": "error"}):
+            with patch.object(geelark, "click_text_on_screen", return_value={"status": "error"}):
+                with patch.object(geelark, "tap", return_value={"status": "success"}) as mock_tap:
+                    res = geelark.smart_click("home", scroll_fallback=False)
+                    self.assertEqual(res["status"], "success")
+                    self.assertEqual(res["path"], "normalized_anchor")
+                    self.assertEqual(res["coords"], [0.5, 0.97])
+                    mock_tap.assert_called_once_with(0.5, 0.97, target=None, normalized=True)
+
+    def test_ensure_device_ready_paths(self):
+        """ensure_device_ready cascades from active window -> restore minimized -> auto scan."""
+        # Case 1: Minimized window gets restored
+        min_win = {"hwnd": 99, "title": "[#4] Phone", "is_phone": True, "minimized": True}
+        with patch.object(geelark, "find_target_window", return_value=min_win):
+            with patch.object(geelark, "focus_window") as mock_focus:
+                res = geelark.ensure_device_ready("4")
+                self.assertEqual(res["status"], "ready")
+                self.assertEqual(res["path"], "restore_minimized_window")
+                mock_focus.assert_called_once_with(99)
+
+        # Case 2: Target not found, auto-discovers another open phone
+        open_phone = {"hwnd": 105, "title": "[#2] Backup", "is_phone": True, "minimized": False}
+        with patch.object(geelark, "find_target_window", return_value=None):
+            with patch.object(geelark, "list_windows", return_value=[open_phone]):
+                res = geelark.ensure_device_ready("4")
+                self.assertEqual(res["status"], "ready")
+                self.assertEqual(res["path"], "auto_discover_open_phone")
+                self.assertEqual(res["window"]["hwnd"], 105)
+
+    def test_execute_natural_prompt_intents(self):
+        """execute_natural_prompt transpiles plain English into recipes and actions."""
+        # 1. TikTok warmup prompt
+        with patch.object(geelark, "set_active_target") as mock_set:
+            with patch.object(geelark, "recipe_tiktok_feed", return_value={"status": "success"}) as mock_tt:
+                res = geelark.execute_natural_prompt("Watch 4 tiktok videos on profile 4 and like them")
+                self.assertEqual(res["status"], "success")
+                self.assertEqual(res["transpiled_intent"], "tiktok-feed")
+                self.assertEqual(res["profile"], "4")
+                mock_set.assert_called_once_with("4")
+                mock_tt.assert_called_once_with(videos=4, like_ratio=0.5, target="4")
+
+        # 2. YouTube flow prompt
+        with patch.object(geelark, "recipe_youtube_flow", return_value={"status": "success"}) as mock_yt:
+            res = geelark.execute_natural_prompt("Open https://www.youtube.com/watch?v=abc123 and click link in description")
+            self.assertEqual(res["status"], "success")
+            self.assertEqual(res["transpiled_intent"], "youtube-flow")
+            mock_yt.assert_called_once_with("https://www.youtube.com/watch?v=abc123", click_link="http", skip_ads=True, target=None)
+
+        # 3. Broadcast dismiss popups
+        with patch.object(geelark, "broadcast_action", return_value={"status": "success"}) as mock_bc:
+            res = geelark.execute_natural_prompt("dismiss popups on all phones")
+            self.assertEqual(res["transpiled_intent"], "broadcast:dismiss-popup")
+            mock_bc.assert_called_once_with("dismiss-popup", [])
+
+    def test_export_agent_schemas(self):
+        """export_agent_schemas generates valid OpenAI/xAI, MCP, and OpenAPI 3.1 specs."""
+        xai_schema = geelark.export_agent_schemas(fmt="xai")
+        self.assertEqual(xai_schema["format"], "xai")
+        self.assertEqual(len(xai_schema["tools"]), 3)
+        self.assertEqual(xai_schema["tools"][0]["function"]["name"], "geelark_prompt")
+
+        openapi_schema = geelark.export_agent_schemas(fmt="openapi")
+        self.assertEqual(openapi_schema["openapi"], "3.1.0")
+        self.assertIn("/prompt", openapi_schema["paths"])
+        self.assertIn("/mcp", openapi_schema["paths"])
+
+    def test_cloud_api_request_missing_token(self):
+        """cloud_api_request returns informative missing_api_token error when token is absent."""
+        with patch.dict(os.environ, {}, clear=True):
+            res = geelark.cloud_api_request("/open/v1/phone/list")
+            self.assertEqual(res["status"], "error")
+            self.assertEqual(res["code"], "missing_api_token")
+            self.assertIn("traceId", res)
+
+
 if __name__ == "__main__":
     unittest.main()
