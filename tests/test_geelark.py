@@ -38,18 +38,27 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 import geelark
+import gl_adb
+import gl_apps
+import gl_base
+import gl_input
+import gl_ocr
+import gl_orch
+import gl_recipes
+import gl_vision
+import gl_win32
 
 
 class TestGeeLarkCoreFeatures(unittest.TestCase):
     """Core capabilities, configuration, and target management."""
 
     def setUp(self):
-        self.original_session_file = geelark.SESSION_CACHE_PATH
+        self.original_session_file = gl_base.SESSION_CACHE_PATH
         self.test_session_file = os.path.join(SCRIPT_DIR, ".test_session.json")
-        geelark.SESSION_CACHE_PATH = self.test_session_file
+        gl_base.SESSION_CACHE_PATH = self.test_session_file
 
     def tearDown(self):
-        geelark.SESSION_CACHE_PATH = self.original_session_file
+        gl_base.SESSION_CACHE_PATH = self.original_session_file
         if os.path.exists(self.test_session_file):
             try:
                 os.remove(self.test_session_file)
@@ -120,7 +129,7 @@ class TestGeeLarkCoreFeatures(unittest.TestCase):
         """Verify get_feature_manifest provides a full and structured catalog."""
         manifest = geelark.get_feature_manifest()
         self.assertEqual(manifest["name"], "geelark-cloud-phone")
-        self.assertIn("4.1", manifest["version"])
+        self.assertEqual(manifest["version"], geelark.VERSION)
 
         # Capabilities inspection
         caps = manifest["capabilities"]
@@ -182,7 +191,7 @@ class TestGeeLarkCoreFeatures(unittest.TestCase):
             {"hwnd": 1014, "title": "#14 GeeLarkPhone|Profile 14", "is_phone": True},
             {"hwnd": 1004, "title": "#4 GeeLarkPhone|Profile 4", "is_phone": True},
         ]
-        with patch.object(geelark, "list_windows", return_value=mock_windows):
+        with patch.object(gl_win32, "list_windows", return_value=mock_windows):
             # Target "4" should match #4, NOT #14!
             matched = geelark.find_target_window("4")
             self.assertIsNotNone(matched)
@@ -203,7 +212,7 @@ class TestGeeLarkCoreFeatures(unittest.TestCase):
 
     def test_target_window_empty_list(self):
         """find_target_window returns None when no windows are open."""
-        with patch.object(geelark, "list_windows", return_value=[]):
+        with patch.object(gl_win32, "list_windows", return_value=[]):
             self.assertIsNone(geelark.find_target_window("4"))
             self.assertIsNone(geelark.find_target_window(None))
 
@@ -239,7 +248,7 @@ class TestGeeLarkGesturesAndInput(unittest.TestCase):
 
     def test_send_key_navigation_mappings(self):
         """Verify back, home, recent, and appswitch map to normalized taps."""
-        with patch.object(geelark, "tap") as mock_tap:
+        with patch.object(gl_input, "tap") as mock_tap, patch.object(gl_adb, "keyevent", return_value=None):
             mock_tap.return_value = {"status": "success"}
 
             geelark.send_key("back", target=101)
@@ -256,7 +265,7 @@ class TestGeeLarkGesturesAndInput(unittest.TestCase):
 
     def test_hide_keyboard_delegates_to_back(self):
         """Verify hide_keyboard sends back key to dismiss the soft keyboard."""
-        with patch.object(geelark, "send_key") as mock_send_key:
+        with patch.object(gl_input, "send_key") as mock_send_key:
             mock_send_key.return_value = {"status": "success", "action": "key", "key": "back"}
             res = geelark.hide_keyboard(target=202)
             mock_send_key.assert_called_with("back", target=202)
@@ -276,12 +285,12 @@ class TestGeeLarkSetOfMarkAndOCR(unittest.TestCase):
     """Set-of-Mark visual annotations and Windows native OCR text matching."""
 
     def setUp(self):
-        self.original_marks_file = geelark.MARKS_CACHE_PATH
+        self.original_marks_file = gl_base.MARKS_CACHE_PATH
         self.test_marks_file = os.path.join(SCRIPT_DIR, ".test_marks_cache.json")
-        geelark.MARKS_CACHE_PATH = self.test_marks_file
+        gl_base.MARKS_CACHE_PATH = self.test_marks_file
 
     def tearDown(self):
-        geelark.MARKS_CACHE_PATH = self.original_marks_file
+        gl_base.MARKS_CACHE_PATH = self.original_marks_file
         if os.path.exists(self.test_marks_file):
             try:
                 os.remove(self.test_marks_file)
@@ -316,7 +325,7 @@ class TestGeeLarkSetOfMarkAndOCR(unittest.TestCase):
         with open(self.test_marks_file, "w", encoding="utf-8") as f:
             json.dump({"marks": {"2": {"norm": [0.35, 0.75]}}}, f)
 
-        with patch.object(geelark, "tap") as mock_tap:
+        with patch.object(gl_input, "tap") as mock_tap:
             mock_tap.return_value = {"status": "success", "coords": [0.35, 0.75]}
             res = geelark.tap_mark(2, target=500)
             mock_tap.assert_called_with(0.35, 0.75, target=500, normalized=True)
@@ -329,8 +338,8 @@ class TestGeeLarkSetOfMarkAndOCR(unittest.TestCase):
             {"text": "Skip", "x": 800, "y": 1500, "w": 100, "h": 50},
             {"text": "Subscribe", "x": 100, "y": 800, "w": 200, "h": 60}
         ]
-        with patch.object(geelark, "capture_phone", return_value=mock_cap):
-            with patch.object(geelark, "run_ocr", return_value=mock_words):
+        with patch.object(gl_vision, "capture_phone", return_value=mock_cap):
+            with patch.object(gl_vision, "run_ocr", return_value=mock_words):
                 res = geelark.find_text_on_screen("skip")
                 self.assertEqual(res["status"], "success")
                 self.assertEqual(res["count"], 1)
@@ -344,15 +353,15 @@ class TestGeeLarkSetOfMarkAndOCR(unittest.TestCase):
             "status": "success",
             "matches": [{"text": "Skip", "norm_center": [0.85, 0.76]}]
         }
-        with patch.object(geelark, "find_text_on_screen", return_value=mock_find_found):
-            with patch.object(geelark, "tap", return_value={"status": "success"}):
+        with patch.object(gl_ocr, "find_text_on_screen", return_value=mock_find_found):
+            with patch.object(gl_input, "tap", return_value={"status": "success"}):
                 res = geelark.click_text_on_screen("Skip", target=1)
                 self.assertEqual(res["status"], "success")
                 self.assertEqual(res["action"], "click-text")
                 self.assertEqual(res["matched"], "Skip")
 
         mock_find_empty = {"status": "success", "matches": []}
-        with patch.object(geelark, "find_text_on_screen", return_value=mock_find_empty):
+        with patch.object(gl_ocr, "find_text_on_screen", return_value=mock_find_empty):
             res_fail = geelark.click_text_on_screen("NonExistent", target=1)
             self.assertEqual(res_fail["status"], "error")
             self.assertIn("not found on phone screen", res_fail["message"])
@@ -361,15 +370,15 @@ class TestGeeLarkSetOfMarkAndOCR(unittest.TestCase):
         """wait_and_click_text polls until text appears or times out."""
         # Case 1: Found immediately
         mock_found = {"status": "success", "matches": [{"text": "Install", "norm_center": [0.5, 0.5]}]}
-        with patch.object(geelark, "find_text_on_screen", return_value=mock_found):
-            with patch.object(geelark, "tap", return_value={"status": "success"}):
+        with patch.object(gl_ocr, "find_text_on_screen", return_value=mock_found):
+            with patch.object(gl_input, "tap", return_value={"status": "success"}):
                 res = geelark.wait_and_click_text("Install", timeout=2.0)
                 self.assertEqual(res["status"], "success")
                 self.assertEqual(res["clicked"], "Install")
 
         # Case 2: Timeout
         mock_empty = {"status": "success", "matches": []}
-        with patch.object(geelark, "find_text_on_screen", return_value=mock_empty):
+        with patch.object(gl_ocr, "find_text_on_screen", return_value=mock_empty):
             res_timeout = geelark.wait_and_click_text("TimeoutText", timeout=0.1, poll_interval=0.05)
             self.assertEqual(res_timeout["status"], "error")
             self.assertIn("Timeout waiting for text", res_timeout["message"])
@@ -381,9 +390,9 @@ class TestGeeLarkSetOfMarkAndOCR(unittest.TestCase):
             {"status": "success", "matches": []},  # Swipe 0: not found
             {"status": "success", "matches": [{"text": "http://example.com", "norm_center": [0.5, 0.6]}]}
         ]
-        with patch.object(geelark, "find_text_on_screen", side_effect=find_results):
-            with patch.object(geelark, "swipe") as mock_swipe:
-                with patch.object(geelark, "tap") as mock_tap:
+        with patch.object(gl_ocr, "find_text_on_screen", side_effect=find_results):
+            with patch.object(gl_input, "swipe") as mock_swipe:
+                with patch.object(gl_input, "tap") as mock_tap:
                     with patch("time.sleep"):
                         res = geelark.scroll_find("http", max_swipes=3, click=True)
                         self.assertEqual(res["status"], "success")
@@ -400,17 +409,17 @@ class TestGeeLarkAppLaunchAndDeepLinks(unittest.TestCase):
     def test_open_app_via_adb_and_fallback(self):
         """open_app uses ADB monkey launcher when available, falling back to visual OCR."""
         # ADB success
-        with patch.object(geelark, "run_adb", return_value={"returncode": 0, "stdout": "Events injected: 1", "stderr": ""}):
+        with patch.object(gl_adb, "run_adb", return_value={"returncode": 0, "stdout": "Events injected: 1", "stderr": ""}):
             res = geelark.open_app("youtube")
             self.assertEqual(res["status"], "success")
             self.assertEqual(res["method"], "adb")
             self.assertEqual(res["package"], "com.google.android.youtube")
 
         # ADB failure -> visual OCR fallback
-        with patch.object(geelark, "run_adb", return_value={"returncode": 1, "stdout": "", "stderr": "error"}):
-            with patch.object(geelark, "send_key"):
-                with patch.object(geelark, "swipe"):
-                    with patch.object(geelark, "click_text_on_screen", return_value={"status": "success"}):
+        with patch.object(gl_adb, "run_adb", return_value={"returncode": 1, "stdout": "", "stderr": "error"}):
+            with patch.object(gl_input, "send_key"):
+                with patch.object(gl_input, "swipe"):
+                    with patch.object(gl_ocr, "click_text_on_screen", return_value={"status": "success"}):
                         with patch("time.sleep"):
                             res_fallback = geelark.open_app("tiktok")
                             self.assertEqual(res_fallback["status"], "success")
@@ -419,17 +428,17 @@ class TestGeeLarkAppLaunchAndDeepLinks(unittest.TestCase):
     def test_deep_link_via_adb_and_fallback(self):
         """deep_link opens URL via intent VIEW or falls back to Chrome omnibox."""
         # ADB Intent success
-        with patch.object(geelark, "run_adb", return_value={"returncode": 0, "stdout": "", "stderr": ""}):
+        with patch.object(gl_adb, "run_adb", return_value={"returncode": 0, "stdout": "", "stderr": ""}):
             res = geelark.deep_link("https://youtube.com/watch?v=xyz")
             self.assertEqual(res["status"], "success")
             self.assertEqual(res["method"], "adb_intent")
 
         # Visual fallback
-        with patch.object(geelark, "run_adb", return_value={"returncode": 1, "stdout": "", "stderr": "Error: Activity not found"}):
-            with patch.object(geelark, "open_app"):
-                with patch.object(geelark, "tap"):
-                    with patch.object(geelark, "type_text"):
-                        with patch.object(geelark, "send_key"):
+        with patch.object(gl_adb, "run_adb", return_value={"returncode": 1, "stdout": "", "stderr": "Error: Activity not found"}):
+            with patch.object(gl_apps, "open_app"):
+                with patch.object(gl_input, "tap"):
+                    with patch.object(gl_input, "type_text"):
+                        with patch.object(gl_input, "send_key"):
                             with patch("time.sleep"):
                                 res_fallback = geelark.deep_link("https://example.com")
                                 self.assertEqual(res_fallback["status"], "success")
@@ -444,9 +453,9 @@ class TestGeeLarkFailsafesAndSelfHealing(unittest.TestCase):
         mock_cap = {"file": "modal.png", "size": [500, 1000]}
         mock_words = [{"text": "Skip trial", "x": 200, "y": 800, "w": 100, "h": 40}]
 
-        with patch.object(geelark, "capture_phone", return_value=mock_cap):
-            with patch.object(geelark, "run_ocr", return_value=mock_words):
-                with patch.object(geelark, "tap") as mock_tap:
+        with patch.object(gl_vision, "capture_phone", return_value=mock_cap):
+            with patch.object(gl_vision, "run_ocr", return_value=mock_words):
+                with patch.object(gl_input, "tap") as mock_tap:
                     res = geelark.dismiss_popups()
                     self.assertEqual(res["status"], "success")
                     self.assertEqual(res["dismissed_via"], "Skip trial")
@@ -455,9 +464,9 @@ class TestGeeLarkFailsafesAndSelfHealing(unittest.TestCase):
     def test_dismiss_popups_fallback_to_back(self):
         """dismiss_popups sends Back key when no dismissal buttons are detected."""
         mock_cap = {"file": "clean.png", "size": [500, 1000]}
-        with patch.object(geelark, "capture_phone", return_value=mock_cap):
-            with patch.object(geelark, "run_ocr", return_value=[]):
-                with patch.object(geelark, "send_key") as mock_send_key:
+        with patch.object(gl_vision, "capture_phone", return_value=mock_cap):
+            with patch.object(gl_vision, "run_ocr", return_value=[]):
+                with patch.object(gl_input, "send_key") as mock_send_key:
                     res = geelark.dismiss_popups()
                     self.assertEqual(res["status"], "success")
                     self.assertEqual(res["dismissed_via"], "back_key")
@@ -465,8 +474,8 @@ class TestGeeLarkFailsafesAndSelfHealing(unittest.TestCase):
 
     def test_emergency_recover(self):
         """emergency_recover issues back-back-home sequence and captures state."""
-        with patch.object(geelark, "send_key") as mock_send_key:
-            with patch.object(geelark, "capture_phone", return_value={"file": "recovered.png"}):
+        with patch.object(gl_input, "send_key") as mock_send_key:
+            with patch.object(gl_vision, "capture_phone", return_value={"file": "recovered.png"}):
                 with patch("time.sleep"):
                     res = geelark.emergency_recover(target="Profile 1")
                     self.assertEqual(res["status"], "recovered")
@@ -522,21 +531,21 @@ class TestGeeLarkOrchestrationAndBatch(unittest.TestCase):
             {"action": "tiktok-feed", "videos": 1}
         ]
 
-        with patch.object(geelark, "tap", return_value={"status": "success"}):
-            with patch.object(geelark, "swipe", return_value={"status": "success"}):
-                with patch.object(geelark, "type_text", return_value={"status": "success"}):
-                    with patch.object(geelark, "send_key", return_value={"status": "success"}):
-                        with patch.object(geelark, "open_app", return_value={"status": "success"}):
-                            with patch.object(geelark, "deep_link", return_value={"status": "success"}):
-                                with patch.object(geelark, "click_text_on_screen", return_value={"status": "success"}):
-                                    with patch.object(geelark, "wait_and_click_text", return_value={"status": "success"}):
-                                        with patch.object(geelark, "scroll_find", return_value={"status": "success"}):
-                                            with patch.object(geelark, "dismiss_popups", return_value={"status": "success"}):
-                                                with patch.object(geelark, "hide_keyboard", return_value={"status": "success"}):
-                                                    with patch.object(geelark, "wait_screen_stable", return_value={"status": "success", "stable": True}):
-                                                        with patch.object(geelark, "capture_phone", return_value={"status": "success", "file": "test_step.png"}):
-                                                            with patch.object(geelark, "recipe_youtube_flow", return_value={"status": "success"}):
-                                                                with patch.object(geelark, "recipe_tiktok_feed", return_value={"status": "success"}):
+        with patch.object(gl_input, "tap", return_value={"status": "success"}):
+            with patch.object(gl_input, "swipe", return_value={"status": "success"}):
+                with patch.object(gl_input, "type_text", return_value={"status": "success"}):
+                    with patch.object(gl_input, "send_key", return_value={"status": "success"}):
+                        with patch.object(gl_apps, "open_app", return_value={"status": "success"}):
+                            with patch.object(gl_apps, "deep_link", return_value={"status": "success"}):
+                                with patch.object(gl_ocr, "click_text_on_screen", return_value={"status": "success"}):
+                                    with patch.object(gl_ocr, "wait_and_click_text", return_value={"status": "success"}):
+                                        with patch.object(gl_ocr, "scroll_find", return_value={"status": "success"}):
+                                            with patch.object(gl_apps, "dismiss_popups", return_value={"status": "success"}):
+                                                with patch.object(gl_input, "hide_keyboard", return_value={"status": "success"}):
+                                                    with patch.object(gl_vision, "wait_screen_stable", return_value={"status": "success", "stable": True}):
+                                                        with patch.object(gl_vision, "capture_phone", return_value={"status": "success", "file": "test_step.png"}):
+                                                            with patch.object(gl_recipes, "recipe_youtube_flow", return_value={"status": "success"}):
+                                                                with patch.object(gl_recipes, "recipe_tiktok_feed", return_value={"status": "success"}):
                                                                     with patch("time.sleep"):
                                                                         res = geelark.execute_batch_steps(steps)
                                                                         self.assertEqual(res["status"], "success")
@@ -549,7 +558,7 @@ class TestGeeLarkOrchestrationAndBatch(unittest.TestCase):
         steps = [
             {"action": "click-text", "query": "MissingButton"}
         ]
-        with patch.object(geelark, "click_text_on_screen", return_value={"status": "error", "message": "Text not found"}):
+        with patch.object(gl_ocr, "click_text_on_screen", return_value={"status": "error", "message": "Text not found"}):
             res = geelark.execute_batch_steps(steps)
             self.assertEqual(res["steps"][0]["status"], "error")
             self.assertIn("Text not found", res["steps"][0]["message"])
@@ -560,7 +569,7 @@ class TestGeeLarkOrchestrationAndBatch(unittest.TestCase):
             {"action": "deep-link", "url": "bad-url"},
             {"action": "sleep", "duration": 0.01}
         ]
-        with patch.object(geelark, "deep_link", side_effect=ValueError("Simulated intent explosion")):
+        with patch.object(gl_apps, "deep_link", side_effect=ValueError("Simulated intent explosion")):
             with patch("time.sleep"):
                 res = geelark.execute_batch_steps(steps)
                 self.assertEqual(res["status"], "success")
@@ -570,7 +579,7 @@ class TestGeeLarkOrchestrationAndBatch(unittest.TestCase):
 
     def test_broadcast_action_no_phones(self):
         """broadcast_action returns error when no open phone windows exist."""
-        with patch.object(geelark, "list_windows", return_value=[]):
+        with patch.object(gl_win32, "list_windows", return_value=[]):
             res = geelark.broadcast_action("key", ["home"])
             self.assertEqual(res["status"], "error")
             self.assertIn("No active phone windows found", res["message"])
@@ -581,9 +590,9 @@ class TestGeeLarkOrchestrationAndBatch(unittest.TestCase):
             {"hwnd": 101, "title": "#1 GeeLarkPhone", "is_phone": True},
             {"hwnd": 102, "title": "#2 GeeLarkPhone", "is_phone": True}
         ]
-        with patch.object(geelark, "list_windows", return_value=mock_phones):
-            with patch.object(geelark, "focus_window"):
-                with patch.object(geelark, "send_key", return_value={"status": "success"}) as mock_key:
+        with patch.object(gl_win32, "list_windows", return_value=mock_phones):
+            with patch.object(gl_win32, "focus_window"):
+                with patch.object(gl_input, "send_key", return_value={"status": "success"}) as mock_key:
                     with patch("time.sleep"):
                         res = geelark.broadcast_action("key", ["home"])
                         self.assertEqual(res["status"], "success")
@@ -594,8 +603,8 @@ class TestGeeLarkOrchestrationAndBatch(unittest.TestCase):
     def test_broadcast_action_validation_and_unsupported(self):
         """broadcast_action validates argument counts and flags unsupported commands."""
         mock_phones = [{"hwnd": 101, "title": "#1 GeeLarkPhone", "is_phone": True}]
-        with patch.object(geelark, "list_windows", return_value=mock_phones):
-            with patch.object(geelark, "focus_window"):
+        with patch.object(gl_win32, "list_windows", return_value=mock_phones):
+            with patch.object(gl_win32, "focus_window"):
                 with patch("time.sleep"):
                     # Missing tap coords
                     res_tap = geelark.broadcast_action("tap", [])
@@ -608,7 +617,7 @@ class TestGeeLarkOrchestrationAndBatch(unittest.TestCase):
     def test_batch_profiles_no_match(self):
         """batch_profiles returns error when requested profile does not match open windows."""
         mock_phones = [{"hwnd": 101, "title": "#1 GeeLarkPhone", "is_phone": True}]
-        with patch.object(geelark, "list_windows", return_value=mock_phones):
+        with patch.object(gl_win32, "list_windows", return_value=mock_phones):
             res = geelark.batch_profiles("99", "key", ["home"])
             self.assertEqual(res["status"], "error")
             self.assertIn("No open phone windows matched profiles", res["message"])
@@ -620,9 +629,9 @@ class TestGeeLarkOrchestrationAndBatch(unittest.TestCase):
             {"hwnd": 102, "title": "#2 GeeLarkPhone", "is_phone": True},
             {"hwnd": 103, "title": "#3 GeeLarkPhone", "is_phone": True}
         ]
-        with patch.object(geelark, "list_windows", return_value=mock_phones):
-            with patch.object(geelark, "focus_window"):
-                with patch.object(geelark, "dismiss_popups", return_value={"status": "success"}) as mock_dismiss:
+        with patch.object(gl_win32, "list_windows", return_value=mock_phones):
+            with patch.object(gl_win32, "focus_window"):
+                with patch.object(gl_apps, "dismiss_popups", return_value={"status": "success"}) as mock_dismiss:
                     with patch("time.sleep"):
                         # Target only 1 and 3
                         res = geelark.batch_profiles("1,3", "dismiss-popup", [])
@@ -636,11 +645,11 @@ class TestGeeLarkRecipesAndCLI(unittest.TestCase):
 
     def test_recipe_youtube_flow(self):
         """recipe_youtube_flow chains deep-link, ad skip, popup dismissal, and link click."""
-        with patch.object(geelark, "deep_link", return_value={"status": "success"}):
-            with patch.object(geelark, "wait_and_click_text", return_value={"status": "success"}):
-                with patch.object(geelark, "dismiss_popups", return_value={"status": "success"}):
-                    with patch.object(geelark, "click_text_on_screen", return_value={"status": "success"}):
-                        with patch.object(geelark, "scroll_find", return_value={"status": "success"}):
+        with patch.object(gl_apps, "deep_link", return_value={"status": "success"}):
+            with patch.object(gl_ocr, "wait_and_click_text", return_value={"status": "success"}):
+                with patch.object(gl_apps, "dismiss_popups", return_value={"status": "success"}):
+                    with patch.object(gl_ocr, "click_text_on_screen", return_value={"status": "success"}):
+                        with patch.object(gl_ocr, "scroll_find", return_value={"status": "success"}):
                             with patch("time.sleep"):
                                 res = geelark.recipe_youtube_flow("https://youtube.com/watch?v=123", click_link="http")
                                 self.assertEqual(res["status"], "success")
@@ -649,10 +658,10 @@ class TestGeeLarkRecipesAndCLI(unittest.TestCase):
 
     def test_recipe_tiktok_feed(self):
         """recipe_tiktok_feed simulates human watching, likes, and curved swipes."""
-        with patch.object(geelark, "open_app", return_value={"status": "success"}):
-            with patch.object(geelark, "dismiss_popups", return_value={"status": "success"}):
-                with patch.object(geelark, "tap", return_value={"status": "success"}):
-                    with patch.object(geelark, "swipe", return_value={"status": "success"}):
+        with patch.object(gl_apps, "open_app", return_value={"status": "success"}):
+            with patch.object(gl_apps, "dismiss_popups", return_value={"status": "success"}):
+                with patch.object(gl_input, "tap", return_value={"status": "success"}):
+                    with patch.object(gl_input, "swipe", return_value={"status": "success"}):
                         with patch("time.sleep"):
                             res = geelark.recipe_tiktok_feed(videos=3, min_watch=1.0, max_watch=2.0, like_ratio=1.0)
                             self.assertEqual(res["status"], "success")
@@ -672,9 +681,9 @@ class TestGeeLarkRecipesAndCLI(unittest.TestCase):
         mock_adb = {
             "stdout": "List of devices attached\nemulator-5554\tdevice\nemulator-5556\toffline\n"
         }
-        with patch.object(geelark, "list_windows", return_value=mock_windows):
-            with patch.object(geelark, "get_active_target", return_value="1"):
-                with patch.object(geelark, "run_adb", return_value=mock_adb):
+        with patch.object(gl_win32, "list_windows", return_value=mock_windows):
+            with patch.object(gl_base, "get_active_target", return_value="1"):
+                with patch.object(gl_adb, "run_adb", return_value=mock_adb):
                     status = geelark.get_system_status()
                     self.assertEqual(status["status"], "success")
                     self.assertEqual(status["active_profile"], "1")
@@ -703,8 +712,8 @@ class TestMultiPathAndUniversalAgents(unittest.TestCase):
     def test_smart_click_path1_adb_ui_tree(self):
         """smart_click succeeds via Path 1 (ADB UIAutomator XML bounds) when node matches."""
         sample_xml = '<hierarchy><node text="Skip Ad" content-desc="" bounds="[800,900][1000,980]" /></hierarchy>'
-        with patch.object(geelark, "dump_ui_tree", return_value={"status": "success", "xml": sample_xml}):
-            with patch.object(geelark, "run_adb", return_value={"returncode": 0, "stdout": "", "stderr": ""}) as mock_adb:
+        with patch.object(gl_apps, "dump_ui_tree", return_value={"status": "success", "xml": sample_xml}):
+            with patch.object(gl_adb, "run_adb", return_value={"returncode": 0, "stdout": "", "stderr": ""}) as mock_adb:
                 res = geelark.smart_click("Skip")
                 self.assertEqual(res["status"], "success")
                 self.assertEqual(res["path"], "adb_ui_tree")
@@ -713,8 +722,8 @@ class TestMultiPathAndUniversalAgents(unittest.TestCase):
 
     def test_smart_click_path2_local_ocr_fallback(self):
         """smart_click falls back to Path 2 (Local OCR) when ADB UI tree is unavailable."""
-        with patch.object(geelark, "dump_ui_tree", return_value={"status": "error"}):
-            with patch.object(geelark, "click_text_on_screen", return_value={"status": "success", "matched": "Subscribe", "coords": [0.5, 0.4]}):
+        with patch.object(gl_apps, "dump_ui_tree", return_value={"status": "error"}):
+            with patch.object(gl_ocr, "click_text_on_screen", return_value={"status": "success", "matched": "Subscribe", "coords": [0.5, 0.4]}):
                 res = geelark.smart_click("Subscribe")
                 self.assertEqual(res["status"], "success")
                 self.assertEqual(res["path"], "local_ocr")
@@ -722,9 +731,9 @@ class TestMultiPathAndUniversalAgents(unittest.TestCase):
 
     def test_smart_click_path3_scroll_find_fallback(self):
         """smart_click falls back to Path 3 (Scroll-Find OCR) when static OCR fails."""
-        with patch.object(geelark, "dump_ui_tree", return_value={"status": "error"}):
-            with patch.object(geelark, "click_text_on_screen", return_value={"status": "error"}):
-                with patch.object(geelark, "scroll_find", return_value={"status": "success", "matched": "ceritypartners.com", "coords": [0.4, 0.6], "swipes_performed": 2}):
+        with patch.object(gl_apps, "dump_ui_tree", return_value={"status": "error"}):
+            with patch.object(gl_ocr, "click_text_on_screen", return_value={"status": "error"}):
+                with patch.object(gl_ocr, "scroll_find", return_value={"status": "success", "matched": "ceritypartners.com", "coords": [0.4, 0.6], "swipes_performed": 2}):
                     res = geelark.smart_click("ceritypartners.com", scroll_fallback=True)
                     self.assertEqual(res["status"], "success")
                     self.assertEqual(res["path"], "scroll_find_ocr")
@@ -732,9 +741,9 @@ class TestMultiPathAndUniversalAgents(unittest.TestCase):
 
     def test_smart_click_path4_normalized_anchor_fallback(self):
         """smart_click falls back to Path 4 (Normalized Anchor) for known system elements."""
-        with patch.object(geelark, "dump_ui_tree", return_value={"status": "error"}):
-            with patch.object(geelark, "click_text_on_screen", return_value={"status": "error"}):
-                with patch.object(geelark, "tap", return_value={"status": "success"}) as mock_tap:
+        with patch.object(gl_apps, "dump_ui_tree", return_value={"status": "error"}):
+            with patch.object(gl_ocr, "click_text_on_screen", return_value={"status": "error"}):
+                with patch.object(gl_input, "tap", return_value={"status": "success"}) as mock_tap:
                     res = geelark.smart_click("home", scroll_fallback=False)
                     self.assertEqual(res["status"], "success")
                     self.assertEqual(res["path"], "normalized_anchor")
@@ -745,8 +754,8 @@ class TestMultiPathAndUniversalAgents(unittest.TestCase):
         """ensure_device_ready cascades from active window -> restore minimized -> auto scan."""
         # Case 1: Minimized window gets restored
         min_win = {"hwnd": 99, "title": "[#4] Phone", "is_phone": True, "minimized": True}
-        with patch.object(geelark, "find_target_window", return_value=min_win):
-            with patch.object(geelark, "focus_window") as mock_focus:
+        with patch.object(gl_win32, "find_target_window", return_value=min_win):
+            with patch.object(gl_win32, "focus_window") as mock_focus:
                 res = geelark.ensure_device_ready("4")
                 self.assertEqual(res["status"], "ready")
                 self.assertEqual(res["path"], "restore_minimized_window")
@@ -754,8 +763,8 @@ class TestMultiPathAndUniversalAgents(unittest.TestCase):
 
         # Case 2: Target not found, auto-discovers another open phone
         open_phone = {"hwnd": 105, "title": "[#2] Backup", "is_phone": True, "minimized": False}
-        with patch.object(geelark, "find_target_window", return_value=None):
-            with patch.object(geelark, "list_windows", return_value=[open_phone]):
+        with patch.object(gl_win32, "find_target_window", return_value=None):
+            with patch.object(gl_win32, "list_windows", return_value=[open_phone]):
                 res = geelark.ensure_device_ready("4")
                 self.assertEqual(res["status"], "ready")
                 self.assertEqual(res["path"], "auto_discover_open_phone")
@@ -764,8 +773,8 @@ class TestMultiPathAndUniversalAgents(unittest.TestCase):
     def test_execute_natural_prompt_intents(self):
         """execute_natural_prompt transpiles plain English into recipes and actions."""
         # 1. TikTok warmup prompt
-        with patch.object(geelark, "set_active_target") as mock_set:
-            with patch.object(geelark, "recipe_tiktok_feed", return_value={"status": "success"}) as mock_tt:
+        with patch.object(gl_base, "set_active_target") as mock_set:
+            with patch.object(gl_recipes, "recipe_tiktok_feed", return_value={"status": "success"}) as mock_tt:
                 res = geelark.execute_natural_prompt("Watch 4 tiktok videos on profile 4 and like them")
                 self.assertEqual(res["status"], "success")
                 self.assertEqual(res["transpiled_intent"], "tiktok-feed")
@@ -774,14 +783,14 @@ class TestMultiPathAndUniversalAgents(unittest.TestCase):
                 mock_tt.assert_called_once_with(videos=4, like_ratio=0.5, target="4")
 
         # 2. YouTube flow prompt
-        with patch.object(geelark, "recipe_youtube_flow", return_value={"status": "success"}) as mock_yt:
+        with patch.object(gl_recipes, "recipe_youtube_flow", return_value={"status": "success"}) as mock_yt:
             res = geelark.execute_natural_prompt("Open https://www.youtube.com/watch?v=abc123 and click link in description")
             self.assertEqual(res["status"], "success")
             self.assertEqual(res["transpiled_intent"], "youtube-flow")
             mock_yt.assert_called_once_with("https://www.youtube.com/watch?v=abc123", click_link="http", skip_ads=True, target=None)
 
         # 3. Broadcast dismiss popups
-        with patch.object(geelark, "broadcast_action", return_value={"status": "success"}) as mock_bc:
+        with patch.object(gl_orch, "broadcast_action", return_value={"status": "success"}) as mock_bc:
             res = geelark.execute_natural_prompt("dismiss popups on all phones")
             self.assertEqual(res["transpiled_intent"], "broadcast:dismiss-popup")
             mock_bc.assert_called_once_with("dismiss-popup", [])
@@ -811,9 +820,9 @@ class TestMultiPathAndUniversalAgents(unittest.TestCase):
         find_results = [
             {"status": "success", "matches": [{"text": "Hidden Link", "norm_center": [0.5, 0.4]}]}
         ]
-        with patch.object(geelark, "find_text_on_screen", side_effect=find_results) as mock_find:
-            with patch.object(geelark, "swipe") as mock_swipe:
-                with patch.object(geelark, "tap") as mock_tap:
+        with patch.object(gl_ocr, "find_text_on_screen", side_effect=find_results) as mock_find:
+            with patch.object(gl_input, "swipe") as mock_swipe:
+                with patch.object(gl_input, "tap") as mock_tap:
                     with patch("time.sleep"):
                         res = geelark.scroll_find("Hidden Link", max_swipes=2, click=True, skip_initial_check=True)
                         self.assertEqual(res["status"], "success")
@@ -831,9 +840,9 @@ class TestMultiPathAndUniversalAgents(unittest.TestCase):
         mock_k32.GlobalLock.return_value = 0xBEEF
         mock_u32.OpenClipboard.return_value = 0  # Always fail to open clipboard
 
-        with patch.object(geelark, "IS_WINDOWS", True), \
-             patch.object(geelark, "kernel32", mock_k32), \
-             patch.object(geelark, "user32", mock_u32), \
+        with patch.object(gl_base, "IS_WINDOWS", True), \
+             patch.object(gl_base, "kernel32", mock_k32), \
+             patch.object(gl_base, "user32", mock_u32), \
              patch("ctypes.memmove"), \
              patch("time.sleep"):
             with self.assertRaises(RuntimeError):
@@ -849,11 +858,11 @@ class TestMultiPathAndUniversalAgents(unittest.TestCase):
         mock_g32.CreateCompatibleBitmap.return_value = 303
         mock_g32.SelectObject.return_value = 404
 
-        with patch.object(geelark, "IS_WINDOWS", True), \
-             patch.object(geelark, "user32", mock_u32), \
-             patch.object(geelark, "gdi32", mock_g32), \
-             patch.object(geelark, "with_desktop", side_effect=lambda fn: fn()), \
-             patch.object(geelark.Image, "frombuffer", side_effect=RuntimeError("Simulated PIL buffer error")):
+        with patch.object(gl_base, "IS_WINDOWS", True), \
+             patch.object(gl_base, "user32", mock_u32), \
+             patch.object(gl_base, "gdi32", mock_g32), \
+             patch.object(gl_base, "with_desktop", side_effect=lambda fn: fn()), \
+             patch.object(gl_base.Image, "frombuffer", side_effect=RuntimeError("Simulated PIL buffer error")):
             with self.assertRaises(RuntimeError):
                 geelark.capture_rect(0, 0, 100, 100)
             mock_g32.SelectObject.assert_any_call(202, 404)

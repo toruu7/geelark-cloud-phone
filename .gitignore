@@ -28,3 +28,5 @@ Desktop.ini
 .idea/
 .active_session.json
 .zou/
+.smoke_capture.png
+*.tmp

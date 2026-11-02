@@ -5,11 +5,11 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Android-brightgreen?style=flat-square&logo=windows)](SKILL.md)
 [![Compatibility](https://img.shields.io/badge/Compatible-Claude_%7C_Antigravity_%7C_Grok_Bot_%7C_Cursor_%7C_OpenClaw_%7C_Codex-orange?style=flat-square)](INSTALL.md)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-66%20Passed-success?style=flat-square)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-115%20Passing-success?style=flat-square)](tests/)
 
-> **`geelark`** · **`cloud-phone`** · **`android-automation`** · **`mobile-agent`** · **`claude-code`** · **`antigravity`** · **`grok-bot`** · **`cursor`** · **`openclaw`** · **`adb`** · **`ocr`** · **`n8n`** · **`set-of-mark`** · **`antidetect`**
+> **`geelark`** · **`cloud-phone`** · **`android-automation`** · **`mobile-agent`** · **`claude-code`** · **`antigravity`** · **`grok-bot`** · **`cursor`** · **`openclaw`** · **`adb`** · **`ocr`** · **`n8n`** · **`set-of-mark`**
 
-A universal, production-grade **Agent Skill & Multi-Protocol Gateway** for controlling and automating **GeeLark cloud phones** visually, via ADB, or via Cloud OpenAPI with automatic **Multi-Path Fallback Routing**, anti-bot Bézier physics, and zero-token local OCR.
+A universal, production-grade **Agent Skill & Multi-Protocol Gateway** for controlling and automating **GeeLark cloud phones** visually, via ADB, or via Cloud OpenAPI with automatic **Multi-Path Fallback Routing**, natural-feeling gestures, and zero-token local OCR.
 
 ### 🌐 Universal Agent Compatibility (Works with ANY AI Agent)
 - **Skill-Native Agents (`SKILL.md`)**: Claude Code, Google Antigravity, Cursor, Windsurf, OpenClaw, Hermes Agent, OpenAI Codex CLI
@@ -32,7 +32,7 @@ A universal, production-grade **Agent Skill & Multi-Protocol Gateway** for contr
 - **Multi-Profile Automation (`batch-profiles`)**: Sequentially process multiple accounts or profiles (`--profiles 1,2,4` or `all`) with a single command.
 - **1-Click High-Level Recipes (`youtube-flow`, `tiktok-feed`)**: Run complex multi-step mobile journeys in a single command (auto-skips ads, expands descriptions, clicks links, or warms up social feeds).
 - **Target Persistence (`use <profile>`)**: Lock onto Profile 4 or any cloud phone once—never repeat `-w` or `--window` again.
-- **Human-like Bézier Gesture Engine (`swipe`)**: Simulates natural human thumb arcs with non-linear velocity easing, making touch interactions undetectable by TikTok/Instagram anti-bot algorithms.
+- **Human-like Bézier Gesture Engine (`swipe`)**: Curved, eased swipe paths with small jitter so gestures look like a thumb rather than a straight line. A usability nicety, not a guarantee against platform detection; follow each platform's terms.
 - **0.1s Instant Deep-Linking (`deep-link`)**: Dispatches Android Intent VIEW to open any video, webpage, or app scheme without tedious manual typing.
 - **Autonomous Scroll & Find (`scroll-find`)**: Finds and clicks text down scrollable views in a single local OCR command, cutting token costs by 80%.
 - **Set-of-Mark (SoM) Visual Badges (`capture --annotate` & `tap-mark`)**: Overlays numbered badges on interactive elements so LLMs can simply call `tap-mark <id>` without coordinate hallucinations.
@@ -86,6 +86,16 @@ python scripts/geelark.py dismiss-popup
 
 ---
 
+## 🔒 Security & Robustness
+
+- **HTTP bridge is locked down**: binds to `127.0.0.1`, requires `Authorization: Bearer <token>` on every POST (auto-generated at startup, or set `GEELARK_BRIDGE_TOKEN`), allowlists commands (no raw `adb`), and sends no CORS headers unless you pass `--cors-origin`. Use `--host 0.0.0.0` only for Docker n8n on a trusted network.
+- **One command at a time**: a cross-process file lock serializes CLI, bridge and MCP calls (exit code 3 / `busy` if it times out).
+- **ADB-first input**: Back/Home/Recent use real Android key events; `GEELARK_INPUT_MODE=adb` injects taps/swipes in the background without taking over your mouse. Every ADB call has a timeout.
+- **Cloud OpenAPI client** retries transient errors, validates endpoints, and never echoes your token.
+- Run the live smoke test against a real phone: `python scripts/smoke_test.py`.
+
+---
+
 ## 📦 Installation & Setup
 
 See [INSTALL.md](INSTALL.md) for 1-minute installation guides for:
@@ -96,7 +106,7 @@ See [INSTALL.md](INSTALL.md) for 1-minute installation guides for:
 - Google Antigravity
 - n8n Local Docker
 
-See [SKILL.md](SKILL.md) for the complete CLI reference, parameter options, and edge case recovery guide.
+See [SKILL.md](SKILL.md) for the agent workflow and safety rules, and [references/cli_reference.md](references/cli_reference.md) for the complete CLI reference.
 See [references/features_and_architecture.md](references/features_and_architecture.md) for deep-dive architecture diagrams, capability specifications, and defensive engineering details.
 See [references/window_specs.md](references/window_specs.md) for window geometry and normalized coordinate maps.
 
@@ -117,12 +127,12 @@ For repository indexing, agent marketplaces, and search engines:
 
 ### 📌 GitHub Topics (Copy-Paste into GitHub Repo "About" Settings):
 ```text
-geelark, cloud-phone, cloudphone, android-automation, mobile-automation, mobile-agent, agent-skill, claude-code, antigravity, hermes-agent, openclaw, codex, adb, windows-ocr, n8n, set-of-mark, antidetect, tiktok-automation, youtube-automation, anti-bot
+geelark, cloud-phone, cloudphone, android-automation, mobile-automation, mobile-agent, agent-skill, claude-code, antigravity, hermes-agent, openclaw, codex, adb, windows-ocr, n8n, set-of-mark, tiktok-automation, youtube-automation
 ```
 
 ### 🔍 Categorized Search Index:
-- **Core Automation**: `geelark`, `geelark-cloud-phone`, `cloud-phone-automation`, `android-automation`, `mobile-automation`, `adb-automation`, `scrcpy-control`, `antidetect-phone`
+- **Core Automation**: `geelark`, `geelark-cloud-phone`, `cloud-phone-automation`, `android-automation`, `mobile-automation`, `adb-automation`, `scrcpy-control`
 - **Agent Ecosystems**: `agent-skill`, `claude-code-skill`, `antigravity-skill`, `hermes-agent-skill`, `openclaw-skill`, `codex-agent`, `ai-agent-tools`, `llm-mobile-control`
 - **Vision & OCR**: `set-of-mark`, `som-prompting`, `windows-media-ocr`, `ocr-automation`, `low-token-vision`, `multimodal-ai`, `screen-analysis`
 - **Multi-Device & Workflows**: `batch-actions`, `multi-phone-broadcast`, `multi-profile-automation`, `n8n-trigger`, `webhook-bridge`, `social-media-automation`
-- **Anti-Bot & Human Simulation**: `bezier-curves`, `natural-gestures`, `anti-bot-bypass`, `tiktok-warmup`, `youtube-automation`
+- **Gestures & Recipes**: `bezier-curves`, `natural-gestures`, `tiktok-warmup`, `youtube-automation`

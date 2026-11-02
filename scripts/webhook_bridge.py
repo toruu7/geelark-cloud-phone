@@ -7,17 +7,71 @@ Runs on Windows Host to allow ANY AI Agent or Orchestrator to control GeeLark Cl
 - Telegram/Discord Bots, Small Local LLMs, Make, Zapier (via Plain-Text /prompt)
 - n8n & Docker Containers (via /run)
 
+Security model:
+  * Binds to 127.0.0.1 by default. Use --host 0.0.0.0 only on a trusted network (e.g. for Docker n8n).
+  * Every POST requires `Authorization: Bearer <token>`. The token comes from --token or
+    GEELARK_BRIDGE_TOKEN; if neither is set a random one is generated and printed at startup.
+  * Only an allowlist of commands may run (no raw `adb`, no `launch-app`).
+  * No CORS headers by default; use --cors-origin <origin> to allow one browser origin.
+
 Usage:
-  python scripts/webhook_bridge.py [--port 5055] [--tunnel]
+  python scripts/webhook_bridge.py [--port 5055] [--host 127.0.0.1] [--token T] [--tunnel] [--cors-origin URL]
 """
 
 import sys
 import os
 import json
+import hmac
+import shlex
+import secrets
 import subprocess
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _version import __version__ as VERSION
+
 PORT = 5055
+DEFAULT_HOST = "127.0.0.1"
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+AUTH_TOKEN = None      # set by main() (or tests); handlers fail closed when it is unset
+CORS_ORIGIN = None     # exact origin string to allow, or None for no CORS headers
+
+# Commands reachable over HTTP/MCP. Deliberately excludes `adb` (arbitrary device shell),
+# `launch-app` and `dump-ui`.
+ALLOWED_COMMANDS = frozenset({
+    "use", "status", "features", "list-windows", "focus", "capture", "tap-mark",
+    "tap", "swipe", "type", "key", "hide-keyboard", "open-app", "deep-link",
+    "find-text", "click-text", "wait-text", "scroll-find", "smart-click",
+    "dismiss-popup", "recover", "wait-stable", "ensure-device",
+    "youtube-flow", "tiktok-feed", "batch-run", "broadcast", "batch-profiles",
+    "prompt", "export-schema",
+    "cloud-list", "cloud-start", "cloud-stop", "cloud-status", "cloud-api",
+})
+
+
+def normalize_cli_args(args):
+    """Turn list / string / scalar `args` into a list of strings (strings are shell-split safely)."""
+    if args is None:
+        return []
+    if isinstance(args, list):
+        return [str(a) for a in args]
+    if isinstance(args, str):
+        parts = shlex.split(args, posix=(os.name != "nt"))
+        return [p[1:-1] if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'" else p for p in parts]
+    if isinstance(args, (int, float, bool)):
+        return [str(args)]
+    return []
+
+
+def authorized(header_value, token=None):
+    """Constant-time bearer check. Fails closed when no token is configured."""
+    token = AUTH_TOKEN if token is None else token
+    if not token:
+        return False
+    supplied = header_value or ""
+    if supplied.lower().startswith("bearer "):
+        supplied = supplied[7:]
+    return hmac.compare_digest(supplied.strip().encode("utf-8"), token.encode("utf-8"))
 MAX_BODY_BYTES = 2 * 1024 * 1024  # 2 MB upper bound for memory safety
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 GEELARK_PY = os.path.join(SCRIPT_DIR, "geelark.py")
@@ -80,7 +134,7 @@ def get_openapi_spec(server_url="http://localhost:5055"):
         "openapi": "3.1.0",
         "info": {
             "title": "GeeLark Cloud Phone Universal Agent Gateway",
-            "version": "4.2.0",
+            "version": VERSION,
             "description": "Universal REST, Webhook, and Remote MCP gateway for controlling GeeLark cloud phones from x.ai/bot (Grok), OpenAI Custom GPTs, Claude, n8n, Dify, CrewAI, and LangChain."
         },
         "servers": [{"url": server_url}],
@@ -130,9 +184,11 @@ class GeeLarkBridgeHandler(BaseHTTPRequestHandler):
     def _send_json(self, status_code, data):
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+        if CORS_ORIGIN:
+            self.send_header("Access-Control-Allow-Origin", CORS_ORIGIN)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
         self.wfile.write(json.dumps(data, indent=2).encode("utf-8"))
 
@@ -158,13 +214,10 @@ class GeeLarkBridgeHandler(BaseHTTPRequestHandler):
         return payload, None
 
     def _run_geelark_cli(self, command, args=None):
+        if str(command) not in ALLOWED_COMMANDS:
+            raise PermissionError(f"Command '{command}' is not allowed over the bridge")
         cmd = [sys.executable, GEELARK_PY, str(command)]
-        if isinstance(args, list):
-            cmd.extend([str(a) for a in args])
-        elif isinstance(args, str):
-            cmd.extend(args.split())
-        elif isinstance(args, (int, float, bool)):
-            cmd.append(str(args))
+        cmd.extend(normalize_cli_args(args))
 
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
         try:
@@ -185,7 +238,7 @@ class GeeLarkBridgeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self._send_json(200, {"status": "healthy", "service": "geelark-webhook-bridge", "version": "4.2.0"})
+            self._send_json(200, {"status": "healthy", "service": "geelark-webhook-bridge", "version": VERSION})
         elif self.path == "/openapi.json":
             host = self.headers.get("Host", f"localhost:{PORT}")
             scheme = "https" if "trycloudflare" in host or "ngrok" in host else "http"
@@ -194,13 +247,13 @@ class GeeLarkBridgeHandler(BaseHTTPRequestHandler):
             self._send_json(200, {
                 "protocol": "mcp",
                 "protocolVersion": "2024-11-05",
-                "serverInfo": {"name": "geelark-cloud-phone", "version": "4.2.0"},
+                "serverInfo": {"name": "geelark-cloud-phone", "version": VERSION},
                 "tools": MCP_TOOLS_MANIFEST
             })
         else:
             self._send_json(200, {
                 "service": "geelark-webhook-bridge",
-                "version": "4.2.0",
+                "version": VERSION,
                 "endpoints": {
                     "POST /run": "Execute a GeeLark CLI command or recipe",
                     "POST /prompt": "Execute a plain-text natural language phone instruction",
@@ -214,6 +267,10 @@ class GeeLarkBridgeHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path not in ["/run", "/prompt", "/mcp", "/sse"]:
             self._send_json(404, {"status": "error", "message": "Endpoint not found. Use POST /run, POST /prompt, or POST /mcp"})
+            return
+
+        if not authorized(self.headers.get("Authorization")):
+            self._send_json(401, {"status": "error", "message": "Unauthorized: send 'Authorization: Bearer <token>'"})
             return
 
         payload, err = self._read_json_body()
@@ -235,6 +292,8 @@ class GeeLarkBridgeHandler(BaseHTTPRequestHandler):
                 self._send_json(200 if res["returncode"] == 0 else 500, res)
             except subprocess.TimeoutExpired:
                 self._send_json(504, {"status": "error", "message": "Command timed out after 90s"})
+            except PermissionError as e:
+                self._send_json(403, {"status": "error", "message": str(e)})
             except Exception as e:
                 self._send_json(500, {"status": "error", "message": str(e)})
             return
@@ -252,7 +311,7 @@ class GeeLarkBridgeHandler(BaseHTTPRequestHandler):
                     "result": {
                         "protocolVersion": "2024-11-05",
                         "capabilities": {"tools": {}},
-                        "serverInfo": {"name": "geelark-cloud-phone", "version": "4.2.0"}
+                        "serverInfo": {"name": "geelark-cloud-phone", "version": VERSION}
                     }
                 })
                 return
@@ -328,30 +387,53 @@ class GeeLarkBridgeHandler(BaseHTTPRequestHandler):
             self._send_json(200 if response["returncode"] == 0 else 500, response)
         except subprocess.TimeoutExpired:
             self._send_json(504, {"status": "error", "message": "Command timed out after 90s"})
+        except PermissionError as e:
+            self._send_json(403, {"status": "error", "message": str(e)})
         except Exception as e:
             self._send_json(500, {"status": "error", "message": str(e)})
 
 
-def main():
-    port = PORT
-    use_tunnel = "--tunnel" in sys.argv
-    if "--port" in sys.argv:
-        idx = sys.argv.index("--port")
+def _arg_value(flag):
+    if flag in sys.argv:
+        idx = sys.argv.index(flag)
         if idx + 1 < len(sys.argv):
-            port = int(sys.argv[idx + 1])
+            return sys.argv[idx + 1]
+    return None
 
-    server = HTTPServer(("0.0.0.0", port), GeeLarkBridgeHandler)
-    print(f"============================================================")
-    print(f"  GeeLark Universal Agent Gateway running on port {port}")
-    print(f"============================================================")
+
+def main():
+    global AUTH_TOKEN, CORS_ORIGIN
+    port = int(_arg_value("--port") or PORT)
+    host = _arg_value("--host") or DEFAULT_HOST
+    use_tunnel = "--tunnel" in sys.argv
+    CORS_ORIGIN = _arg_value("--cors-origin")
+
+    AUTH_TOKEN = _arg_value("--token") or os.environ.get("GEELARK_BRIDGE_TOKEN", "").strip()
+    generated = False
+    if not AUTH_TOKEN:
+        AUTH_TOKEN = secrets.token_urlsafe(24)
+        generated = True
+    if len(AUTH_TOKEN) < 16:
+        print("[!] Refusing to start: bridge token must be at least 16 characters.")
+        sys.exit(2)
+
+    server = HTTPServer((host, port), GeeLarkBridgeHandler)
+    print("============================================================")
+    print(f"  GeeLark Universal Agent Gateway v{VERSION} on {host}:{port}")
+    print("============================================================")
     print(f"  * Local Webhook (/run):       http://localhost:{port}/run")
     print(f"  * Plain-Text (/prompt):       http://localhost:{port}/prompt")
     print(f"  * Remote MCP (/mcp & /sse):   http://localhost:{port}/mcp")
     print(f"  * OpenAPI 3.1 Spec:           http://localhost:{port}/openapi.json")
-    print(f"  * Docker n8n URL:             http://host.docker.internal:{port}/run")
+    print(f"  * Docker n8n URL:             http://host.docker.internal:{port}/run  (needs --host 0.0.0.0)")
+    print(f"  * Auth: send header  Authorization: Bearer {AUTH_TOKEN if generated else '<your token>'}")
+    if generated:
+        print("    (token generated for this run; set GEELARK_BRIDGE_TOKEN to make it stable)")
+    if host not in LOOPBACK_HOSTS:
+        print(f"[!] Listening on non-loopback address {host}: anyone who can reach this port and has the token can drive your phones.")
 
     if use_tunnel:
-        print(f"\n[*] Launching public HTTPS ingress tunnel (npx untun)...")
+        print("\n[*] Launching public HTTPS ingress tunnel (npx untun); requests still require the bearer token...")
         try:
             subprocess.Popen(["npx", "--yes", "untun@latest", "tunnel", f"http://localhost:{port}"])
         except Exception as e:

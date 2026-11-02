@@ -48,12 +48,27 @@ class DummyRequest:
 class TestWebhookBridge(unittest.TestCase):
     """Test suite for HTTP handlers in GeeLark Webhook Bridge."""
 
-    def _create_handler(self, method="GET", path="/", body=None, headers=None):
+    TOKEN = "test-token-0123456789abcdef"
+
+    def setUp(self):
+        self._old_token = webhook_bridge.AUTH_TOKEN
+        self._old_cors = webhook_bridge.CORS_ORIGIN
+        webhook_bridge.AUTH_TOKEN = self.TOKEN
+        webhook_bridge.CORS_ORIGIN = None
+
+    def tearDown(self):
+        webhook_bridge.AUTH_TOKEN = self._old_token
+        webhook_bridge.CORS_ORIGIN = self._old_cors
+
+    def _create_handler(self, method="GET", path="/", body=None, headers=None, auth=True):
+        headers = dict(headers or {})
+        if auth:
+            headers.setdefault("Authorization", f"Bearer {self.TOKEN}")
         handler = webhook_bridge.GeeLarkBridgeHandler.__new__(webhook_bridge.GeeLarkBridgeHandler)
         handler.path = path
         handler.command = method
         handler.wfile = io.BytesIO()
-        handler.headers = headers or {}
+        handler.headers = headers
         
         if body is not None:
             if isinstance(body, str):
@@ -101,7 +116,15 @@ class TestWebhookBridge(unittest.TestCase):
         handler.send_response.assert_called_with(200)
         output = json.loads(handler.wfile.getvalue().decode("utf-8"))
         self.assertEqual(output["status"], "ok")
-        handler.send_header.assert_any_call("Access-Control-Allow-Origin", "*")
+        # No CORS headers unless an origin is explicitly configured
+        sent = [c.args[0] for c in handler.send_header.call_args_list]
+        self.assertNotIn("Access-Control-Allow-Origin", sent)
+
+    def test_cors_only_for_configured_origin(self):
+        webhook_bridge.CORS_ORIGIN = "https://n8n.example"
+        handler = self._create_handler("OPTIONS", "/run")
+        handler.do_OPTIONS()
+        handler.send_header.assert_any_call("Access-Control-Allow-Origin", "https://n8n.example")
 
     def test_post_invalid_endpoint_returns_404(self):
         """Verify POST to non-existent endpoint returns 404."""
@@ -361,6 +384,83 @@ class TestWebhookBridge(unittest.TestCase):
             "params": {"name": "nonexistent_tool", "arguments": {}}
         })
         self.assertEqual(res_unk_tool["error"]["code"], -32601)
+
+
+class TestBridgeSecurity(unittest.TestCase):
+    """Auth, command allowlist and argument parsing."""
+
+    TOKEN = "test-token-0123456789abcdef"
+
+    def setUp(self):
+        self._old = webhook_bridge.AUTH_TOKEN
+        webhook_bridge.AUTH_TOKEN = self.TOKEN
+        self.helper = TestWebhookBridge("test_health_endpoint")
+
+    def tearDown(self):
+        webhook_bridge.AUTH_TOKEN = self._old
+
+    def _post(self, path, body, **kw):
+        h = self.helper._create_handler("POST", path, body=body, **kw)
+        h.do_POST()
+        return h, json.loads(h.wfile.getvalue().decode("utf-8"))
+
+    def test_missing_token_returns_401_and_never_spawns(self):
+        with patch("subprocess.run") as run:
+            h, out = self._post("/run", {"command": "status"}, auth=False)
+            h.send_response.assert_called_with(401)
+            run.assert_not_called()
+
+    def test_wrong_token_returns_401(self):
+        with patch("subprocess.run") as run:
+            h, _ = self._post("/run", {"command": "status"}, auth=False, headers={"Authorization": "Bearer nope"})
+            h.send_response.assert_called_with(401)
+            run.assert_not_called()
+
+    def test_fails_closed_when_no_token_configured(self):
+        webhook_bridge.AUTH_TOKEN = None
+        with patch("subprocess.run") as run:
+            h, _ = self._post("/run", {"command": "status"})
+            h.send_response.assert_called_with(401)
+            run.assert_not_called()
+
+    def test_mcp_and_prompt_require_auth(self):
+        for path, body in (("/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}), ("/prompt", {"prompt": "x"})):
+            h, _ = self._post(path, body, auth=False)
+            h.send_response.assert_called_with(401)
+
+    def test_health_stays_public(self):
+        h = self.helper._create_handler("GET", "/health", auth=False)
+        h.do_GET()
+        h.send_response.assert_called_with(200)
+
+    def test_dangerous_commands_are_forbidden(self):
+        for cmd in ("adb", "launch-app", "dump-ui", "rm", "../evil"):
+            with patch("subprocess.run") as run:
+                h, out = self._post("/run", {"command": cmd, "args": ["shell", "id"]})
+                h.send_response.assert_called_with(403)
+                run.assert_not_called()
+
+    def test_mcp_geelark_command_blocks_adb(self):
+        import mcp_stdio
+        code, out = mcp_stdio.run_cli("adb", ["shell", "id"])
+        self.assertEqual(code, 1)
+        self.assertIn("not allowed", out)
+
+    def test_normalize_cli_args(self):
+        n = webhook_bridge.normalize_cli_args
+        self.assertEqual(n(["a", 1]), ["a", "1"])
+        self.assertEqual(n('0.5 0.8 --norm'), ["0.5", "0.8", "--norm"])
+        self.assertEqual(n('"hello world" --enter'), ["hello world", "--enter"])
+        self.assertEqual(n(4), ["4"])
+        self.assertEqual(n(None), [])
+        self.assertEqual(n({"x": 1}), [])
+
+    def test_authorized_helper(self):
+        self.assertTrue(webhook_bridge.authorized("Bearer " + self.TOKEN))
+        self.assertTrue(webhook_bridge.authorized(self.TOKEN))
+        self.assertFalse(webhook_bridge.authorized(""))
+        self.assertFalse(webhook_bridge.authorized(None))
+        self.assertFalse(webhook_bridge.authorized("Bearer wrong"))
 
 
 if __name__ == "__main__":

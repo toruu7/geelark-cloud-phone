@@ -1,6 +1,6 @@
 # GeeLark Cloud Phone Automation Skill — Architecture & Feature Reference
 
-This document provides a comprehensive technical reference for the **GeeLark Cloud Phone Automation Skill** (v4.1 Production Edition). Engineered according to the open **Agent Skill Standard**, it enables autonomous AI agents (**Claude Code, Hermes, OpenClaw, OpenAI Codex, Antigravity**) and external orchestrators (**n8n, Docker**) to control, automate, and inspect GeeLark cloud phones with token efficiency and anti-bot defense.
+This document provides a comprehensive technical reference for the **GeeLark Cloud Phone Automation Skill** . Engineered according to the open **Agent Skill Standard**, it enables autonomous AI agents (**Claude Code, Hermes, OpenClaw, OpenAI Codex, Antigravity**) and external orchestrators (**n8n, Docker**) to control, automate, and inspect GeeLark cloud phones with token efficiency and a hardened local gateway.
 
 ---
 
@@ -18,7 +18,7 @@ flowchart TD
         Bridge["scripts/webhook_bridge.py (Port 5055)"]
     end
 
-    subgraph CoreEngine ["GeeLark Automation Engine (v4.1)"]
+    subgraph CoreEngine ["GeeLark Automation Engine"]
         TargetMgr["Target & Session Manager (.active_session.json)"]
         Win32API["Win32 Interactive Desktop & Window Matcher"]
         GestureEngine["Bézier Gesture Engine & Easing Interpolator"]
@@ -73,14 +73,12 @@ flowchart TD
 
 ### 3. Human-like Bézier Touch & Gesture Engine
 - **Commands**: `tap`, `swipe`, `type`, `key`, `hide-keyboard`
-- **Anti-Bot Defense**: Social media platforms (TikTok, Instagram, YouTube) analyze swipe trajectories and velocities. GeeLark's gesture engine calculates smooth **cubic Bézier curves** with randomized thumb jitter ($\pm 16\text{px}$) and non-linear velocity easing:
+- **Natural-feeling gestures**: Straight, constant-speed swipes look robotic. The gesture engine calculates smooth **cubic Bézier curves** with randomized thumb jitter ($\pm 16\text{px}$) and non-linear velocity easing:
   $$\text{ease\_in\_out}(t) = 3t^2 - 2t^3$$
   This produces slow acceleration and gentle deceleration, mimicking genuine human thumb physics.
 - **Normalized Coordinates (`--norm`)**: Accepts `0.0` to `1.0` floats, translating proportionally to the active touchscreen dimensions regardless of physical monitor resolution.
 - **Key Mappings**:
-  - `back` $\rightarrow$ Normalized tap `(0.18, 0.97)`
-  - `home` $\rightarrow$ Normalized tap `(0.50, 0.97)`
-  - `recent` / `appswitch` $\rightarrow$ Normalized tap `(0.82, 0.97)`
+  - `back` / `home` / `recent` $\rightarrow$ ADB `input keyevent` when exactly one device is known (or via `use --device` / `GEELARK_ADB_DEVICE`); otherwise normalized taps at `(0.18 | 0.50 | 0.82, 0.97)`
   - `enter`, `tab`, `esc`, `backspace` $\rightarrow$ Native virtual key codes
 
 ### 4. Visual Capture & Set-of-Mark (SoM) Indexing
@@ -191,3 +189,38 @@ python3 -m unittest discover tests
   - `TestGeeLarkRecipesAndCLI`: YouTube recipe, TikTok recipe, system status inspection, human-readable vs JSON manifests.
 - `tests/test_webhook_bridge.py`:
   - `TestWebhookBridge`: Health checks, CORS preflight, route validation, malformed payload rejections, subprocess execution, JSON and text parsing, timeout handling (504), and error handling (500).
+
+
+---
+
+## 🔒 Robustness Layer (v4.3)
+
+| Concern | Mechanism |
+| :--- | :--- |
+| Unauthenticated remote control | Bridge binds `127.0.0.1`, mandatory bearer token (constant-time compare, fails closed), command allowlist (no `adb`/`launch-app`), no default CORS. |
+| Concurrent commands fighting over mouse, windows, `.ocr_cap.png` | `scripts/gl_lock.py`: OS file lock around every command that touches the desktop or shared cache files; released automatically if the process dies. |
+| Hung or missing ADB | `scripts/gl_adb.py`: hard timeout, structured error instead of exception, serial validation, cached device resolution. |
+| Mouse/focus takeover | `GEELARK_INPUT_MODE=adb` injects normalized taps/swipes over ADB; Back/Home/Recent use keyevents. |
+| Torn session/marks JSON | Atomic write (temp file + `os.replace`). |
+| Cloud API flakiness / misuse | Retry with backoff on 429/5xx/network errors, `/open/...` endpoint validation, API-level error surfacing, no token echo. |
+| Version drift | `scripts/_version.py` is the single source; tests assert `SKILL.md` and `skill.json` match. |
+
+Not covered: the GUI path still needs a visible, unminimized phone window, and OCR depends on installed Windows language packs.
+
+### Module layout
+
+`scripts/geelark.py` is now a thin facade (`python scripts/geelark.py <cmd>` and `import geelark` still work). Code lives in:
+
+| Module | Responsibility |
+| :--- | :--- |
+| `gl_base` | Win32 handles, constants, paths, active-target session, gesture math |
+| `gl_win32` | Window discovery/focus, screen-rect capture, phone geometry |
+| `gl_vision` | Screenshots, OCR invocation, Set-of-Mark, stability check |
+| `gl_input` | Tap, swipe, type, keys (GUI or ADB) |
+| `gl_ocr` | find / click / wait / scroll-find |
+| `gl_apps` | open-app, deep-link, popups, recover, UI dump |
+| `gl_recipes`, `gl_orch`, `gl_smart` | Recipes; batch / broadcast / status; smart-click |
+| `gl_cloud`, `gl_prompt`, `gl_manifest`, `gl_cli` | Cloud API + readiness; text transpiler; schemas / manifest; CLI |
+| `gl_adb`, `gl_lock`, `_version` | ADB runner, process lock, version |
+
+Modules call each other as `gl_module.function(...)`, so every name has exactly one definition site. **When writing tests, patch the defining module** (`patch.object(gl_win32, "list_windows")`), not the `geelark` facade.

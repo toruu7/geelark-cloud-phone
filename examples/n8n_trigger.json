@@ -22,6 +22,15 @@
       "parameters": {
         "method": "POST",
         "url": "http://host.docker.internal:5055/run",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GEELARK_BRIDGE_TOKEN }}"
+            }
+          ]
+        },
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={\n  \"command\": {{ $json.body.command || 'deep-link' }},\n  \"args\": {{ $json.body.args || ['https://www.youtube.com/watch?v=Bm84BAtOfQw'] }}\n}",

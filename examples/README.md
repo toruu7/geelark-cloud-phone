@@ -33,16 +33,17 @@ http://host.docker.internal:5055/run   python scripts/geelark.py
 Because Docker containers run in an isolated Linux environment, they communicate with your Windows host via `host.docker.internal`.
 
 ### Step 1: Start the Webhook Bridge on Windows
-In a Windows terminal:
+In a Windows terminal (Docker reaches the host via `host.docker.internal`, so the bridge must listen beyond loopback):
 ```powershell
-python scripts/webhook_bridge.py
+$env:GEELARK_BRIDGE_TOKEN = "<a long random secret, 16+ chars>"
+python scripts/webhook_bridge.py --host 0.0.0.0
 ```
-This starts a lightweight zero-dependency bridge on port `5055`.
+The bridge listens on port `5055`, rejects any POST without `Authorization: Bearer <token>`, and only runs allowlisted commands. Allow inbound `5055` from the Docker network only; never expose it to the internet.
 
 ### Step 2: Import the Workflow in n8n
 1. Open your n8n dashboard (e.g. `http://localhost:5678`).
-2. Go to **Workflows** -> **Import from File**.
-3. Select `examples/n8n_trigger.json`.
+2. Give n8n an environment variable `GEELARK_BRIDGE_TOKEN` with the same secret (the imported workflow sends it as a Bearer header).
+3. Go to **Workflows** -> **Import from File** and select `examples/n8n_trigger.json`.
 
 ### Step 3: Trigger via HTTP POST
 You can test the webhook via curl or any API tester:
@@ -80,6 +81,13 @@ If you installed n8n directly on Windows (`npm install -g n8n` or `npx n8n`):
 1. In the imported workflow, connect **Webhook Inbound** directly to the **Execute Directly (Host n8n)** node.
 2. The node runs:
    ```bash
-   python "C:\Users\Backspace\.gemini\config\skills\geelark-cloud-phone\scripts\geelark.py" {{ $json.body.command }} {{ $json.body.args.join(' ') }}
+   python "<path-to-skill>\scripts\geelark.py" {{ $json.body.command }} {{ $json.body.args.join(' ') }}
    ```
 3. It executes natively on your desktop without requiring the webhook bridge.
+
+## Calling the bridge directly
+```bash
+curl -X POST http://localhost:5055/run \
+  -H "Authorization: Bearer $GEELARK_BRIDGE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"command": "status"}'
+```

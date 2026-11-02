@@ -13,7 +13,7 @@ Usage in mcp.json / claude_desktop_config.json:
   "mcpServers": {
     "geelark-cloud-phone": {
       "command": "python",
-      "args": ["C:/Users/Backspace/Documents/bkspc/geelark-cloud-phone/scripts/mcp_stdio.py"]
+      "args": ["<path-to>/geelark-cloud-phone/scripts/mcp_stdio.py"]
     }
   }
 }
@@ -27,15 +27,16 @@ import subprocess
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 GEELARK_PY = os.path.join(SCRIPT_DIR, "geelark.py")
 
-from webhook_bridge import MCP_TOOLS_MANIFEST
+sys.path.insert(0, SCRIPT_DIR)
+from webhook_bridge import MCP_TOOLS_MANIFEST, ALLOWED_COMMANDS, normalize_cli_args
+from _version import __version__ as VERSION
 
 
 def run_cli(command, args=None):
+    if str(command) not in ALLOWED_COMMANDS:
+        return 1, f"Command '{command}' is not allowed"
     cmd = [sys.executable, GEELARK_PY, str(command)]
-    if isinstance(args, list):
-        cmd.extend([str(a) for a in args])
-    elif isinstance(args, str):
-        cmd.extend(args.split())
+    cmd.extend(normalize_cli_args(args))
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
     return proc.returncode, proc.stdout.strip() or proc.stderr.strip()
 
@@ -52,7 +53,7 @@ def handle_rpc_message(msg):
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "geelark-cloud-phone", "version": "4.2.0"}
+                "serverInfo": {"name": "geelark-cloud-phone", "version": VERSION}
             }
         }
     elif method in ["notifications/initialized"]:

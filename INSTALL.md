@@ -13,7 +13,7 @@ This skill is packaged according to the universal **Agent Skill Standard**, maki
 
 Ensure Python 3.8+ is installed on the Windows host with `Pillow`:
 ```bash
-pip install pillow
+pip install -r requirements.txt
 ```
 No extra native compilers, build tools, or binary dependencies are required.
 
@@ -85,10 +85,30 @@ If your agent runs from a system prompt or terminal tool:
 ## 6. Local Docker n8n Integration
 
 If you want to trigger cloud phone actions via **n8n** running in local Docker:
-1. Start the host webhook bridge:
+1. Start the host webhook bridge with a token (listening beyond loopback so Docker can reach it):
    ```powershell
-   python scripts/webhook_bridge.py
+   $env:GEELARK_BRIDGE_TOKEN = "<long random secret>"
+   python scripts/webhook_bridge.py --host 0.0.0.0
    ```
 2. In n8n, import [`examples/n8n_trigger.json`](examples/n8n_trigger.json).
 3. The workflow routes requests to `http://host.docker.internal:5055/run`.
 4. See [examples/README.md](examples/README.md) for full instructions and sample curl requests.
+
+---
+
+## 7. Optional: pre-approve read-only commands in Claude Code
+
+To stop Claude Code prompting for commands that only look at the phone, add them to `permissions.allow` in your settings (adjust the path to where you installed the skill):
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *geelark-cloud-phone*/scripts/geelark.py status*)",
+      "Bash(python *geelark-cloud-phone*/scripts/geelark.py list-windows*)",
+      "Bash(python *geelark-cloud-phone*/scripts/geelark.py capture*)",
+      "Bash(python *geelark-cloud-phone*/scripts/geelark.py find-text*)"
+    ]
+  }
+}
+```
+Leave tap, swipe, type, key, batch and recipe commands unapproved so you see each one that changes the phone.
