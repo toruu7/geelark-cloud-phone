@@ -19,7 +19,9 @@ import gl_base
 ALLOWED_HOSTS = {"script.google.com", "script.googleusercontent.com"}
 DEFAULT_LOG_DIR = os.path.join(gl_base.SCRIPT_DIR, "..", "logs")
 SPOOL_NAME = ".report_spool.jsonl"
-RETRY_STATUSES = {429, 500, 502, 503, 504}
+# 401 is retried because Apps Script returns it transiently (e.g. right after a redeploy); a wrong secret
+# is answered with a normal JSON {ok:false,error:'unauthorized'}, never a 401, so retrying cannot hide misconfiguration.
+RETRY_STATUSES = {401, 429, 500, 502, 503, 504}
 
 
 class SheetsError(RuntimeError):

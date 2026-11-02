@@ -518,6 +518,14 @@ class TestSheetsClient(unittest.TestCase):
             self.assertFalse(c.call("ping")["ok"])
         self.assertEqual(uo.call_count, 1)
 
+    def test_transient_401_is_retried(self):
+        c = gl_sheets.SheetsClient(self.URL, "s", retries=2)
+        err = urllib.error.HTTPError("u", 401, "Unauthorized", {}, io.BytesIO(b""))
+        self.addCleanup(err.close)
+        with patch("urllib.request.urlopen", side_effect=[err, _Resp('{"ok": true}')]) as uo:
+            self.assertTrue(c.call("ping")["ok"])
+        self.assertEqual(uo.call_count, 2)
+
     def test_non_json_and_error_responses(self):
         c = gl_sheets.SheetsClient(self.URL, "s")
         with patch("urllib.request.urlopen", return_value=_Resp("<html>login</html>")):
