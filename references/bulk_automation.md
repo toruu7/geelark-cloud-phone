@@ -1,4 +1,4 @@
-# Bulk automation (ADB) with Google Sheets
+# Bulk automation (ADB) with Google Sheets, local and cloud phones
 
 Run the same kind of task on many phones in parallel, with a Google Sheet as the **task queue** and the **report log**.
 
@@ -31,10 +31,16 @@ The URL must be an `https://script.google.com/...` address; the secret is sent i
 
 ## 2. Queue tasks (the `Tasks` tab)
 
+Tab layout, created for you by `setup()` (headers must keep these exact names):
+`Tasks`: task_id, device, action, params, status, attempts, worker, claimed_at, finished_at, result
+`Reports`: timestamp, run_id, task_id, device, action, status, attempts, duration_s, message, output
+`Runs`: run_id, started, finished, workers, total, success, failed, other, notes
+
+
 | Column | You fill in | Meaning |
 | :--- | :--- | :--- |
 | `task_id` | optional | Unique label. Blank gets `row-N`. |
-| `device` | optional | ADB serial (see `adb devices`). **Blank = any phone.** |
+| `device` | optional | A local ADB serial (see `adb devices`), or **`cloud:<phone_id>`** for a GeeLark cloud phone. **Blank = any local phone** (never a cloud phone). |
 | `action` | yes | One of the actions below. |
 | `params` | per action | JSON object, e.g. `{"name":"youtube"}`. |
 | `status` | leave blank | Blank/`pending` = waiting. The runner sets `running`, then `success` or `failed`. |
@@ -73,24 +79,40 @@ Example `flow` row:
 ```
 See [`examples/bulk_tasks.json`](../examples/bulk_tasks.json) for a local file in the same format.
 
-## 3. Run
+## 3. Cloud phones (GeeLark cloud ADB)
+
+Put `cloud:<phone_id>` (the GeeLark profile id) in the `device` column. The same sheet then drives cloud phones too:
+
+* `bulk-run --cloud` reads which `cloud:` phones have waiting tasks, **starts each one** (start phone, enable ADB, connect, log in, via the separate `geelark-cloud-adb` skill), runs that phone's tasks over its ADB address, then **stops it**.
+* Cloud phones **bill per minute**, so they are opt-in: without `--cloud`, `cloud:` tasks stay `pending` in the sheet and the run just logs that they were left. At most `--max-cloud-phones` (default 2) are started per run.
+* A cloud phone only takes tasks addressed to it; blank-device tasks never run on (or start) a cloud phone.
+* **Phones are always stopped**: when their tasks finish, if boot or a task fails, on Ctrl+C, and again in a final sweep at the end of the run. If a stop fails, the run reports `STOP FAILED` loudly (event row, run notes, `cloud.stop_failures`).
+* If the process is killed outright (power loss, `taskkill`), phones it started stay listed in `logs/.cloud_active.json`. The next run warns about them, and `python scripts/geelark.py bulk-cloud-stop` stops them.
+* Rows in `Reports` show `cloud:<id>` as the device (the IP:port changes every start). The `Runs` summary notes the number of cloud phones and roughly how many phone-minutes the run used.
+* Needs `GEELARK_API_TOKEN` in the environment and the `geelark-cloud-adb` skill installed (found automatically in `~/.claude/skills`, next to this skill, or via `GEELARK_CLOUD_ADB=<path to geelark_adb.py>`). The ADB password never passes through this tool.
+* Cloud phones are slower to boot (30-90 s) and have no Google account signed in; see that skill's notes. Use `--cloud-up-timeout` if boots are slow.
+
+Example: [`examples/bulk_tasks_cloud.json`](../examples/bulk_tasks_cloud.json) (replace `YOUR_PHONE_ID`).
+
+## 4. Run
 
 ```powershell
 python scripts/geelark.py bulk-run                      # claim from the sheet until the queue is empty
 python scripts/geelark.py bulk-run --tasks examples/bulk_tasks.json --dry-run   # validate only, touches nothing
 python scripts/geelark.py bulk-run --tasks tasks.csv --devices 98.98.125.37:21127 --max-tasks 5
 ```
-Useful flags: `--devices a,b` (default: all connected), `--max-workers 8`, `--retries 1`, `--task-timeout 120`, `--task-delay 2` (pause between tasks on one phone), `--no-sheet` (local log only), `--fail-on-error` (exit 4 if anything failed), `--log-dir`.
+Cloud: `python scripts/geelark.py bulk-run --cloud --max-tasks 1` (first run: one task, then check the sheet and that the phone stopped).
+Useful flags: `--cloud`, `--max-cloud-phones 2`, `--cloud-up-timeout 180`, `--devices a,b` (default: all connected), `--max-workers 8`, `--retries 1`, `--task-timeout 120`, `--task-delay 2` (pause between tasks on one phone), `--no-sheet` (local log only), `--fail-on-error` (exit 4 if anything failed), `--log-dir`.
 
 **Always dry-run a new task file first, and start with `--max-tasks 1`** on a single phone before unleashing a long queue.
 
-## 4. Reports
+## 5. Reports
 
 `Reports` tab (one row per attempt outcome or event):
 
 | Column | Values |
 | :--- | :--- |
-| `status` | `success`, `failed`, `error` (invalid task), `timeout`, `offline` (phone not reachable), `skipped` (no matching phone), or an event level `info` / `warning` / `error` |
+| `status` | `success`, `failed`, `error` (invalid task), `timeout`, `offline` (phone not reachable), `skipped` (no matching phone, or a cloud phone that was not started), or an event level `info` / `warning` / `error` |
 | `attempts`, `duration_s` | Tries used and total time |
 | `message`, `output` | What happened; structured detail (screenshot path, foreground app, per-step results of a flow) |
 
@@ -105,10 +127,13 @@ Exit codes: `0` finished, `1` could not start (no devices / no task source), `4`
 | `claim failed: unauthorized` | `GEELARK_SHEETS_SECRET` does not match the `SECRET` script property. |
 | `non_json_response` | The web app is not deployed as "Anyone", or you edited the script without redeploying a new version. |
 | Reports missing in the sheet | `bulk-flush` replays anything spooled while the sheet was unreachable. |
+| Cloud tasks stay `pending` | You ran without `--cloud`, or `GEELARK_API_TOKEN` / the `geelark-cloud-adb` skill is missing (see the run's event rows). |
+| `STOP FAILED` | Stop it manually in GeeLark, or run `bulk-cloud-stop`. It may still be billing until stopped. |
 | Tasks stay `running` | A previous run was killed. They are re-issued after 15 minutes, or set them to `pending`. |
 | `open-app` says focus is another app | A permission or login dialog is on top. Add a `wait-text`/`click-text` step, or set `verify_s: 0`. |
 
 ## Safety
 * Bulk runs change many accounts at once. Confirm the task list with a person before a real run, and never queue tasks you would not do by hand (posting, buying, messaging).
 * Platforms may restrict accounts that behave like bots. Use `--task-delay` and sensible volumes; this tool does not hide automation.
+* Starting cloud phones spends money. Confirm which phones and roughly how long before using `--cloud`, and check afterwards that nothing is left running.
 * Treat the Apps Script URL + secret like a password: whoever has both can queue work onto your phones.

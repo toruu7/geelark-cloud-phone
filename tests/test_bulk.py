@@ -76,14 +76,18 @@ class FakeSheet:
         self.lock = threading.Lock()
         self.reject_writes = False
 
-    def claim(self, worker, limit=1):
+    def claim(self, worker, limit=1, exact=False):
         if self.claim_error:
             raise gl_sheets.SheetsError("claim failed: unauthorized")
         with self.lock:
             for i, t in enumerate(self.queue):
-                if t.get("device") in ("", None, worker):
+                dev = t.get("device") or ""
+                if dev == worker or (dev == "" and not exact):
                     return [self.queue.pop(i)]
         return []
+
+    def pending_devices(self):
+        return sorted({t.get("device") for t in self.queue if t.get("device")})
 
     def call(self, verb, **payload):
         if self.reject_writes:

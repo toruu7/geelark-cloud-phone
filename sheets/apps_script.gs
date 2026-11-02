@@ -51,6 +51,7 @@ function doPost(e) {
     switch (body.action) {
       case 'ping':    return out_({ ok: true, now: new Date().toISOString() });
       case 'claim':   return out_(claim_(body));
+      case 'devices': return out_(devices_(body));
       case 'report':  return out_(report_(body));
       case 'log':     return out_(log_(body));
       case 'summary': return out_(summary_(body));
@@ -84,6 +85,7 @@ function claim_(body) {
     }
     if (!(status === '' || status === 'pending' || stale)) continue;
     if (device && device !== worker) continue;          // blank device = any worker may take it
+    if (!device && body.exact) continue;                // ...except billed cloud phones, which only take tasks addressed to them
     var taskId = String(row[col.task_id] || '') || ('row-' + (r + 1));
     sheet.getRange(r + 1, col.task_id + 1).setValue(taskId);
     sheet.getRange(r + 1, col.status + 1).setValue('running');
@@ -98,6 +100,25 @@ function claim_(body) {
     });
   }
   return { ok: true, tasks: claimed };
+}
+
+// Distinct devices named by tasks that are waiting to run, so the runner knows which cloud phones to start.
+function devices_(body) {
+  var values = sheet_(TASKS).getDataRange().getValues();
+  if (values.length < 2) return { ok: true, devices: [] };
+  var col = indexMap_(values[0]);
+  var now = new Date();
+  var seen = {};
+  for (var r = 1; r < values.length; r++) {
+    var status = String(values[r][col.status] || '').trim().toLowerCase();
+    var stale = status === 'running' && values[r][col.claimed_at] &&
+                (now - new Date(values[r][col.claimed_at])) > STALE_MINUTES * 60000;
+    if (!(status === '' || status === 'pending' || stale)) continue;
+    if (!String(values[r][col.action] || '').trim()) continue;
+    var device = String(values[r][col.device] || '').trim();
+    if (device) seen[device] = true;
+  }
+  return { ok: true, devices: Object.keys(seen) };
 }
 
 function report_(body) {

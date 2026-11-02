@@ -55,7 +55,7 @@ Each step may carry `"window": "<profile>"`.
 ```
 
 ## Bulk automation (ADB, parallel)
-`bulk-run [--tasks FILE.json|.csv] [--devices a,b] [--retries N] [--max-workers N] [--max-tasks N] [--task-timeout S] [--task-delay S] [--dry-run] [--no-sheet] [--fail-on-error]`, `bulk-check`, `bulk-flush`.
+`bulk-run [--cloud] [--max-cloud-phones N] [--cloud-up-timeout S] [--tasks FILE.json|.csv] [--devices a,b] [--retries N] [--max-workers N] [--max-tasks N] [--task-timeout S] [--task-delay S] [--dry-run] [--no-sheet] [--fail-on-error]`, `bulk-check`, `bulk-flush`, `bulk-cloud-stop` (stops cloud phones an interrupted run left running).
 Full guide, actions and sheet format: [bulk_automation.md](bulk_automation.md). These commands never take the desktop lock and are not exposed through the HTTP bridge.
 
 ## Cloud OpenAPI (optional)
@@ -73,6 +73,7 @@ Check GeeLark's current OpenAPI docs for endpoint names and body shapes before u
 | `GEELARK_INPUT_MODE` | `gui` (default, real mouse) or `adb` (background taps/swipes; normalized coords only). |
 | `GEELARK_LOCK_TIMEOUT` / `GEELARK_LOCK_PATH` | Cross-process lock wait (default 60 s) and lock file. |
 | `GEELARK_API_TOKEN`, `GEELARK_CLOUD_PHONE_ID` | Cloud OpenAPI. |
+| `GEELARK_CLOUD_ADB` | Path to the geelark-cloud-adb skill's `geelark_adb.py` (auto-detected if installed in a standard place). |
 | `GEELARK_BRIDGE_TOKEN` | Bearer token for the HTTP bridge. |
 | `GEELARK_SHEETS_URL`, `GEELARK_SHEETS_SECRET` | Apps Script web app URL and its secret, for `bulk-run` / `bulk-check` / `bulk-flush`. |
 

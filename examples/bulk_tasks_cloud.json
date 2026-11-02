@@ -1,0 +1,23 @@
+{
+  "tasks": [
+    {
+      "task_id": "cloud-check",
+      "device": "cloud:YOUR_PHONE_ID",
+      "action": "check-device"
+    },
+    {
+      "task_id": "cloud-open-link",
+      "device": "cloud:YOUR_PHONE_ID",
+      "action": "deep-link",
+      "params": {
+        "url": "https://www.youtube.com/watch?v=Bm84BAtOfQw",
+        "package": "com.google.android.youtube"
+      }
+    },
+    {
+      "task_id": "cloud-shot",
+      "device": "cloud:YOUR_PHONE_ID",
+      "action": "screenshot"
+    }
+  ]
+}

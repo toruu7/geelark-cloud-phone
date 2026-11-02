@@ -19,6 +19,7 @@ from datetime import datetime
 
 import gl_adb
 import gl_base
+import gl_cloudadb
 import gl_sheets
 
 MAX_SLEEP_S = 300
@@ -107,7 +108,10 @@ def normalize_task(raw):
         "action": action,
         "params": parse_params(raw.get("params")),
     }
-    if task["device"] and not gl_adb._SERIAL_RE.match(task["device"]):
+    if gl_cloudadb.is_cloud_device(task["device"]):
+        if not gl_cloudadb.CLOUD_DEVICE_RE.match(task["device"]):
+            raise TaskError(f"invalid cloud device '{task['device']}' (expected cloud:<phone_id>)")
+    elif task["device"] and not gl_adb._SERIAL_RE.match(task["device"]):
         raise TaskError(f"invalid device serial '{task['device']}'")
     validate_action(action, task["params"])
     return task
@@ -502,8 +506,12 @@ def execute_task(device, task, run_id, retries, task_timeout, shots_dir, reporte
 
 
 def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, max_tasks=None,
-             task_timeout=120, task_delay=0.0, dry_run=False, log_dir=None, run_id=None):
-    """Run tasks on `devices` in parallel. `tasks` = local list; otherwise tasks are claimed from `client`'s sheet."""
+             task_timeout=120, task_delay=0.0, dry_run=False, log_dir=None, run_id=None,
+             cloud=False, max_cloud_phones=2, cloud_up_timeout=180):
+    """Run tasks in parallel, one worker per phone. `tasks` = local list; otherwise tasks are claimed from `client`'s sheet.
+
+    Local ADB phones are addressed by serial. GeeLark cloud phones are addressed as `cloud:<phone_id>`; they are only
+    started when `cloud=True` (they bill per minute), only take tasks addressed to them, and are always stopped."""
     run_id = run_id or f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
     started = gl_sheets.now_iso()
     local_mode = tasks is not None
@@ -524,22 +532,49 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
             except TaskError as e:
                 invalid.append((raw, str(e)))
     if dry_run:
+        cloud_targets = sorted({t["device"] for t in queue if gl_cloudadb.is_cloud_device(t["device"])})
         return {"status": "success", "dry_run": True, "run_id": run_id,
                 "valid": [{"task_id": t["task_id"], "device": t["device"] or "any", "action": t["action"]} for t in queue],
-                "invalid": [{"task_id": str((r or {}).get("task_id", "")) if isinstance(r, dict) else "", "error": e} for r, e in invalid]}
+                "invalid": [{"task_id": str((r or {}).get("task_id", "")) if isinstance(r, dict) else "", "error": e} for r, e in invalid],
+                "cloud_phones_needed": cloud_targets}
 
     if client and not local_mode:
         flushed = gl_sheets.flush_spool(client, log_dir)
         if flushed["sent"]:
             reporter.event("info", f"replayed {flushed['sent']} spooled report(s) from an earlier run")
+    leftovers = gl_cloudadb.leftover_phones(reporter.log_dir)
+    if leftovers:
+        reporter.event("warning", f"cloud phone(s) from an interrupted run may still be billing: {', '.join(leftovers)}. "
+                                  "Run `bulk-cloud-stop` to stop them.")
 
+    # Workers: (claim name, adb serial). Cloud phones get their serial only after they have been started.
     online = devices or gl_adb.list_devices(use_cache=False)
-    workers = [d for d in online if gl_adb._SERIAL_RE.match(d)][:max(1, max_workers)]
+    local_workers = [(d, d) for d in online if gl_adb._SERIAL_RE.match(d) and not gl_cloudadb.is_cloud_device(d)][:max(1, max_workers)]
+
+    wanted_cloud = set()
+    try:
+        if local_mode:
+            wanted_cloud = {t["device"] for t in queue}
+        else:
+            wanted_cloud = set(client.pending_devices())
+    except gl_sheets.SheetsError as e:
+        reporter.event("error", f"could not read pending devices: {e}")
+    wanted_cloud = sorted(d for d in wanted_cloud if gl_cloudadb.CLOUD_DEVICE_RE.match(d))
+    cloud_workers = []
+    if wanted_cloud and not cloud:
+        reporter.event("info", f"{len(wanted_cloud)} cloud phone(s) have waiting tasks ({', '.join(wanted_cloud)}); "
+                               "not started. Re-run with --cloud to start them (cloud phones bill per minute).")
+    elif wanted_cloud:
+        cloud_workers = [(d, None) for d in wanted_cloud[:max(0, max_cloud_phones)]]
+        if len(wanted_cloud) > len(cloud_workers):
+            reporter.event("warning", f"cloud phone limit {max_cloud_phones} reached; left pending: {', '.join(wanted_cloud[len(cloud_workers):])}")
+
+    workers = local_workers + cloud_workers
     if not workers:
         reporter.event("error", "no ADB devices available")
         reporter.summary(started, [], 0, notes="no devices")
         return {"status": "error", "message": "No ADB devices found (run `adb devices`).", "run_id": run_id, "log": reporter.log_path}
-    reporter.event("info", f"run started on {len(workers)} device(s): {', '.join(workers)}")
+    reporter.event("info", f"run started on {len(workers)} phone(s): {', '.join(n for n, _ in workers)}")
 
     for raw, err in invalid:
         reporter.report({"task_id": str((raw or {}).get("task_id", "")) if isinstance(raw, dict) else "",
@@ -549,6 +584,7 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
     lock = threading.Lock()
     budget = {"left": max_tasks if max_tasks else float("inf"), "total": len(invalid)}
     stop = threading.Event()
+    cloud_state = {"started": set(), "stopped": set(), "billed_s": 0.0, "stop_failures": []}
 
     def reserve():
         with lock:
@@ -561,16 +597,16 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
         with lock:
             budget["left"] += 1
 
-    def next_local(device):
+    def next_local(name, exact):
         with lock:
             for i, t in enumerate(queue):
-                if t["device"] in ("", device):
+                if t["device"] == name or (t["device"] == "" and not exact):
                     return queue.pop(i)
         return None
 
-    def next_sheet(device):
+    def next_sheet(name, exact):
         try:
-            got = client.claim(device, limit=1)
+            got = client.claim(name, limit=1, exact=exact)
         except gl_sheets.SheetsError as e:
             raise RuntimeError(str(e))
         if not got:
@@ -579,23 +615,24 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
             return normalize_task(dict(got[0], device=got[0].get("device") or ""))
         except TaskError as e:
             raw = got[0]
-            reporter.report({"task_id": raw.get("task_id", ""), "device": device, "action": raw.get("action", "")},
+            reporter.report({"task_id": raw.get("task_id", ""), "device": name, "action": raw.get("action", "")},
                             "error", 0, 0, f"invalid task: {e}")
             with lock:
                 budget["total"] += 1
             return "invalid"
 
-    def worker(device):
+    def work(name, serial, exact):
+        """Take tasks for phone `name` one at a time and run them over `serial` until none are left."""
         failures = 0
         while not stop.is_set():
             if not reserve():
                 return
             try:
-                task = next_local(device) if local_mode else next_sheet(device)
+                task = next_local(name, exact) if local_mode else next_sheet(name, exact)
             except Exception as e:
                 give_back()
                 failures += 1
-                reporter.event("error", f"could not fetch tasks: {e}", device)
+                reporter.event("error", f"could not fetch tasks: {e}", name)
                 if failures >= 3:
                     return
                 time.sleep(2 * failures)
@@ -608,33 +645,87 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
                 continue
             with lock:
                 budget["total"] += 1
-            execute_task(device, task, run_id, retries, task_timeout, shots_dir, reporter)
+            execute_task(serial, dict(task, device=name), run_id, retries, task_timeout, shots_dir, reporter)
             if task_delay:
                 time.sleep(task_delay)
 
-    threads = [threading.Thread(target=worker, args=(d,), name=f"bulk-{d}", daemon=True) for d in workers]
+    def stop_cloud(name, final=False):
+        """Stop a cloud phone. The worker's attempt may fail; the final sweep gets a second chance and only then
+        is a failure recorded as an error (the phone may still be billing)."""
+        pid = gl_cloudadb.phone_id(name)
+        with lock:
+            if name in cloud_state["stopped"] or name not in cloud_state["started"]:
+                return
+        try:
+            gl_cloudadb.cloud_down(pid, reporter.log_dir)
+            with lock:
+                cloud_state["stopped"].add(name)
+            reporter.event("info", f"cloud phone {pid} stopped", name)
+        except gl_cloudadb.CloudError as e:
+            if not final:
+                reporter.event("warning", f"stopping {pid} failed, will retry before the run ends: {e}", name)
+                return
+            with lock:
+                cloud_state["stop_failures"].append(pid)
+            reporter.event("error", f"STOP FAILED, {pid} may still be billing: {e}", name)
+
+    def cloud_worker(name):
+        pid = gl_cloudadb.phone_id(name)
+        t0 = time.monotonic()
+        with lock:
+            cloud_state["started"].add(name)  # recorded before `up` so a half-started phone is still stopped
+        try:
+            reporter.event("info", f"starting cloud phone {pid} (billing starts)", name)
+            serial = gl_cloudadb.cloud_up(pid, reporter.log_dir, cloud_up_timeout)
+            reporter.event("info", f"cloud phone {pid} ready as {serial} after {time.monotonic() - t0:.0f}s", name)
+            work(name, serial, True)
+        except gl_cloudadb.CloudError as e:
+            reporter.event("error", str(e), name)
+        except Exception as e:
+            reporter.event("error", f"cloud worker crashed: {type(e).__name__}: {e}", name)
+        finally:
+            stop_cloud(name)
+            with lock:
+                cloud_state["billed_s"] += time.monotonic() - t0
+
+    threads = [threading.Thread(target=work, args=(n, s, False), name=f"bulk-{n}", daemon=True) for n, s in local_workers]
+    threads += [threading.Thread(target=cloud_worker, args=(n,), name=f"bulk-{n}", daemon=True) for n, _ in cloud_workers]
     interrupted = False
-    for t in threads:
-        t.start()
     try:
+        for t in threads:
+            t.start()
         for t in threads:
             while t.is_alive():
                 t.join(0.5)
     except KeyboardInterrupt:
         interrupted = True
         stop.set()
-        reporter.event("warning", "interrupted; finishing in-flight tasks")
+        reporter.event("warning", "interrupted; finishing in-flight tasks and stopping cloud phones")
         for t in threads:
-            t.join(30)
+            t.join(60)
+    finally:
+        # Billing safety net: whatever happened above, stop every cloud phone this run started.
+        for name in sorted(cloud_state["started"]):
+            stop_cloud(name, final=True)
 
-    # Local tasks nobody could run (their device is not connected) are reported, not dropped.
+    # Local tasks nobody could run are reported, not dropped.
     for t in queue:
-        reporter.report(t, "skipped", 0, 0, f"device '{t['device']}' not connected or run ended before it was reached")
+        why = ("cloud phone not started (use --cloud)" if gl_cloudadb.is_cloud_device(t["device"])
+               else f"device '{t['device']}' not connected or run ended before it was reached")
+        reporter.report(t, "skipped", 0, 0, why)
         budget["total"] += 1
 
-    notes = "interrupted" if interrupted else ""
-    summary = reporter.summary(started, workers, budget["total"], notes)
-    return {"status": "success", "run_id": run_id, "workers": workers, "total": summary["total"],
+    notes = []
+    if interrupted:
+        notes.append("interrupted")
+    if cloud_state["started"]:
+        notes.append(f"cloud phones: {len(cloud_state['started'])}, ~{cloud_state['billed_s'] / 60:.1f} phone-minutes")
+    if cloud_state["stop_failures"]:
+        notes.append("STOP FAILED: " + ",".join(cloud_state["stop_failures"]))
+    summary = reporter.summary(started, [n for n, _ in workers], budget["total"], "; ".join(notes))
+    return {"status": "success", "run_id": run_id, "workers": [n for n, _ in workers], "total": summary["total"],
             "success": summary["success"], "failed": summary["failed"], "other": summary["other"],
-            "log": reporter.log_path, "sheet_write_failures": reporter.sheet_failures,
-            "interrupted": interrupted}
+            "log": reporter.log_path, "sheet_write_failures": reporter.sheet_failures, "interrupted": interrupted,
+            "cloud": {"started": sorted(cloud_state["started"]), "stopped": sorted(cloud_state["stopped"]),
+                      "stop_failures": cloud_state["stop_failures"],
+                      "phone_minutes": round(cloud_state["billed_s"] / 60, 1)}}

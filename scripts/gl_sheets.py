@@ -86,8 +86,14 @@ class SheetsClient:
     def ping(self):
         return self.call("ping")
 
-    def claim(self, worker, limit=1):
-        res = self.call("claim", worker=worker, limit=limit)
+    def pending_devices(self):
+        res = self.call("devices")
+        if not res.get("ok"):
+            raise SheetsError(f"devices failed: {res.get('error')} {res.get('detail', '')}".strip())
+        return [str(d) for d in res.get("devices", [])]
+
+    def claim(self, worker, limit=1, exact=False):
+        res = self.call("claim", worker=worker, limit=limit, exact=bool(exact))
         if not res.get("ok"):
             raise SheetsError(f"claim failed: {res.get('error')} {res.get('detail', '')}".strip())
         return res.get("tasks", [])

@@ -12,6 +12,7 @@ import gl_apps
 import gl_base
 import gl_bulk
 import gl_cloud
+import gl_cloudadb
 import gl_input
 import gl_manifest
 import gl_ocr
@@ -30,7 +31,7 @@ LOCK_FREE_COMMANDS = {
     "features", "export-schema", "use", "status", "list-windows",
     "cloud-list", "cloud-start", "cloud-stop", "cloud-status", "cloud-api",
     # ADB-only: never touches the mouse, windows or shared desktop cache files
-    "bulk-run", "bulk-check", "bulk-flush",
+    "bulk-run", "bulk-check", "bulk-flush", "bulk-cloud-stop",
 }
 
 def main():
@@ -242,9 +243,14 @@ def main():
     p_bulk.add_argument("--dry-run", action="store_true", help="Validate a --tasks file and show the plan; touch nothing")
     p_bulk.add_argument("--no-sheet", action="store_true", help="Log locally only, even if sheet env vars are set")
     p_bulk.add_argument("--log-dir", help="Directory for run logs, screenshots and the report spool (default: ./logs)")
+    p_bulk.add_argument("--cloud", action="store_true", help="Start GeeLark cloud phones named as cloud:<id> in tasks (they bill per minute; always stopped afterwards)")
+    p_bulk.add_argument("--max-cloud-phones", type=int, default=2, help="Cap on cloud phones started in one run (default 2)")
+    p_bulk.add_argument("--cloud-up-timeout", type=int, default=180, help="Seconds to wait for a cloud phone to boot and ADB to connect")
     p_bulk.add_argument("--fail-on-error", action="store_true", help="Exit with code 4 if any task failed")
 
     p_bchk = subparsers.add_parser("bulk-check", help="Check ADB devices and the Google Sheet connection")
+    p_bstop = subparsers.add_parser("bulk-cloud-stop", help="Stop cloud phones a killed/interrupted bulk run left running (stops billing)")
+    p_bstop.add_argument("--log-dir", help="Directory holding the cloud registry (default: ./logs)")
     p_bflush = subparsers.add_parser("bulk-flush", help="Re-send reports that could not reach the sheet earlier")
     p_bflush.add_argument("--log-dir", help="Directory holding the report spool")
 
@@ -471,7 +477,8 @@ def main():
                 tasks=tasks, client=client,
                 devices=[d.strip() for d in args.devices.split(",") if d.strip()] if args.devices else None,
                 retries=max(0, args.retries), max_workers=args.max_workers, max_tasks=args.max_tasks,
-                task_timeout=args.task_timeout, task_delay=args.task_delay, dry_run=args.dry_run, log_dir=args.log_dir)
+                task_timeout=args.task_timeout, task_delay=args.task_delay, dry_run=args.dry_run, log_dir=args.log_dir,
+                cloud=args.cloud, max_cloud_phones=args.max_cloud_phones, cloud_up_timeout=args.cloud_up_timeout)
             print(json.dumps(res, indent=2))
             if res.get("status") == "error":
                 sys.exit(1)
@@ -486,6 +493,12 @@ def main():
                 ping = client.ping()
                 sheet = {"configured": True, "reachable": bool(ping.get("ok")), "error": ping.get("error")}
             print(json.dumps({"status": "success", "adb_devices": devices, "sheet": sheet}, indent=2))
+
+        elif args.command == "bulk-cloud-stop":
+            res = gl_cloudadb.stop_leftovers(args.log_dir or gl_sheets.DEFAULT_LOG_DIR)
+            print(json.dumps(dict(res, status="error" if res["failed"] else "success"), indent=2))
+            if res["failed"]:
+                sys.exit(1)
 
         elif args.command == "bulk-flush":
             client = gl_sheets.SheetsClient.from_env()

@@ -191,7 +191,7 @@ def get_feature_manifest():
             },
             "bulk_automation": {
                 "description": "ADB-only parallel task runner: one worker per phone, tasks from a Google Sheet queue or JSON/CSV file, every outcome reported to the sheet and a local log",
-                "commands": ["bulk-run", "bulk-check", "bulk-flush"],
+                "commands": ["bulk-run", "bulk-check", "bulk-flush", "bulk-cloud-stop"],
                 "features": ["Sheet-as-queue via Apps Script", "Per-task retries, timeouts, offline detection", "Local JSONL log + offline report spool", "No mouse takeover"]
             },
             "external_integrations": {
