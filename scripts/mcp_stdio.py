@@ -114,20 +114,23 @@ def handle_rpc_message(msg):
 
 
 def main():
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            msg = json.loads(line)
-            resp = handle_rpc_message(msg)
-            if resp is not None:
-                sys.stdout.write(json.dumps(resp) + "\n")
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+                resp = handle_rpc_message(msg)
+                if resp is not None:
+                    sys.stdout.write(json.dumps(resp) + "\n")
+                    sys.stdout.flush()
+            except Exception as e:
+                err_resp = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(e)}}
+                sys.stdout.write(json.dumps(err_resp) + "\n")
                 sys.stdout.flush()
-        except Exception as e:
-            err_resp = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(e)}}
-            sys.stdout.write(json.dumps(err_resp) + "\n")
-            sys.stdout.flush()
+    except (KeyboardInterrupt, EOFError, BrokenPipeError):
+        pass
 
 
 if __name__ == "__main__":

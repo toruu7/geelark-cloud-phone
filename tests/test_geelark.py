@@ -806,6 +806,61 @@ class TestMultiPathAndUniversalAgents(unittest.TestCase):
             self.assertEqual(res["code"], "missing_api_token")
             self.assertIn("traceId", res)
 
+    def test_scroll_find_skip_initial_check_cost_optimization(self):
+        """scroll_find(skip_initial_check=True) skips redundant OCR on swipe_idx=0 and swipes immediately."""
+        find_results = [
+            {"status": "success", "matches": [{"text": "Hidden Link", "norm_center": [0.5, 0.4]}]}
+        ]
+        with patch.object(geelark, "find_text_on_screen", side_effect=find_results) as mock_find:
+            with patch.object(geelark, "swipe") as mock_swipe:
+                with patch.object(geelark, "tap") as mock_tap:
+                    with patch("time.sleep"):
+                        res = geelark.scroll_find("Hidden Link", max_swipes=2, click=True, skip_initial_check=True)
+                        self.assertEqual(res["status"], "success")
+                        self.assertEqual(res["swipes_performed"], 1)
+                        # Only 1 OCR call occurred (after swipe 1), instead of 2!
+                        self.assertEqual(mock_find.call_count, 1)
+                        mock_swipe.assert_called_once()
+                        mock_tap.assert_called_once()
+
+    def test_set_clipboard_text_frees_memory_on_failure(self):
+        """set_clipboard_text calls GlobalFree(h_mem) when OpenClipboard fails, preventing Win32 heap leaks."""
+        mock_k32 = MagicMock()
+        mock_u32 = MagicMock()
+        mock_k32.GlobalAlloc.return_value = 0xDEAD
+        mock_k32.GlobalLock.return_value = 0xBEEF
+        mock_u32.OpenClipboard.return_value = 0  # Always fail to open clipboard
+
+        with patch.object(geelark, "IS_WINDOWS", True), \
+             patch.object(geelark, "kernel32", mock_k32), \
+             patch.object(geelark, "user32", mock_u32), \
+             patch("ctypes.memmove"), \
+             patch("time.sleep"):
+            with self.assertRaises(RuntimeError):
+                geelark.set_clipboard_text("leak test")
+            mock_k32.GlobalFree.assert_called_once_with(0xDEAD)
+
+    def test_capture_rect_releases_gdi_handles_on_exception(self):
+        """capture_rect always releases GDI handles (DeleteObject, DeleteDC, ReleaseDC) even if Image.frombuffer fails."""
+        mock_u32 = MagicMock()
+        mock_g32 = MagicMock()
+        mock_u32.GetDC.return_value = 101
+        mock_g32.CreateCompatibleDC.return_value = 202
+        mock_g32.CreateCompatibleBitmap.return_value = 303
+        mock_g32.SelectObject.return_value = 404
+
+        with patch.object(geelark, "IS_WINDOWS", True), \
+             patch.object(geelark, "user32", mock_u32), \
+             patch.object(geelark, "gdi32", mock_g32), \
+             patch.object(geelark, "with_desktop", side_effect=lambda fn: fn()), \
+             patch.object(geelark.Image, "frombuffer", side_effect=RuntimeError("Simulated PIL buffer error")):
+            with self.assertRaises(RuntimeError):
+                geelark.capture_rect(0, 0, 100, 100)
+            mock_g32.SelectObject.assert_any_call(202, 404)
+            mock_g32.DeleteObject.assert_called_once_with(303)
+            mock_g32.DeleteDC.assert_called_once_with(202)
+            mock_u32.ReleaseDC.assert_called_once_with(0, 101)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,7 @@ import subprocess
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 PORT = 5055
+MAX_BODY_BYTES = 2 * 1024 * 1024  # 2 MB upper bound for memory safety
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 GEELARK_PY = os.path.join(SCRIPT_DIR, "geelark.py")
 
@@ -143,7 +144,10 @@ class GeeLarkBridgeHandler(BaseHTTPRequestHandler):
         except (ValueError, TypeError):
             content_length = 0
 
-        body = self.rfile.read(content_length).decode("utf-8") if content_length > 0 else ""
+        if content_length > MAX_BODY_BYTES:
+            return None, f"Payload too large ({content_length} bytes exceeds {MAX_BODY_BYTES} byte limit)"
+
+        body = self.rfile.read(content_length).decode("utf-8", errors="replace") if content_length > 0 else ""
         try:
             payload = json.loads(body) if body else {}
         except Exception as e:

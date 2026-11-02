@@ -21,6 +21,10 @@ import subprocess
 import threading
 import ctypes
 import re
+import random
+import uuid
+import urllib.request
+import urllib.error
 from ctypes import wintypes
 try:
     from PIL import Image, ImageChops, ImageDraw
@@ -28,6 +32,18 @@ except ImportError:
     Image = None
     ImageChops = None
     ImageDraw = None
+
+# Pre-compiled Regular Expressions for Zero-Overhead Parsing
+RE_XML_NODE = re.compile(r'<node[^>]+>', re.IGNORECASE)
+RE_XML_TEXT = re.compile(r'text="([^"]*)"')
+RE_XML_DESC = re.compile(r'content-desc="([^"]*)"')
+RE_XML_BOUNDS = re.compile(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
+RE_PROFILE_NUM = re.compile(r'(?:profile|phone|window|#)\s*(\d+)')
+RE_URL = re.compile(r"(https?://[^\s\"'<>]+)")
+RE_VIDEO_COUNT = re.compile(r'(\d+)\s*(?:tiktok|video|vid|clip)')
+RE_OPEN_APP = re.compile(r'\b(?:open|launch|start)\s+(youtube|tiktok|chrome|settings|playstore|files)\b')
+RE_TYPE_TEXT = re.compile(r"(?:type|write|input|search\s+for)\s+[\"']?([^\"']+)[\"']?", re.IGNORECASE)
+RE_CLICK_TEXT = re.compile(r"(?:click|tap|press|select)\s+(?:on\s+)?[\"']?([^\"']+)[\"']?", re.IGNORECASE)
 
 # ---------------------------------------------------------
 # Win32 Definitions & Setup (Safe Multi-Platform Guard)
@@ -42,6 +58,8 @@ if IS_WINDOWS:
     # 64-bit Win32 API signatures for reliable clipboard memory handling
     kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
     kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+    kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalFree.restype = wintypes.HGLOBAL
     kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
     kernel32.GlobalLock.restype = ctypes.c_void_p
     kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
@@ -267,26 +285,38 @@ def capture_rect(x, y, w, h):
         raise RuntimeError("Pillow is required for image operations. Install with 'pip install pillow'")
     def worker():
         hScreenDC = user32.GetDC(0)
-        hMemDC = gdi32.CreateCompatibleDC(hScreenDC)
-        hBitmap = gdi32.CreateCompatibleBitmap(hScreenDC, w, h)
-        hOldBitmap = gdi32.SelectObject(hMemDC, hBitmap)
-        gdi32.BitBlt(hMemDC, 0, 0, w, h, hScreenDC, x, y, SRCCOPY)
-        bmi = BITMAPINFOHEADER()
-        bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-        bmi.biWidth = w
-        bmi.biHeight = -h
-        bmi.biPlanes = 1
-        bmi.biBitCount = 32
-        bmi.biCompression = 0
-        buf_size = w * h * 4
-        buffer = (ctypes.c_char * buf_size)()
-        gdi32.GetDIBits(hMemDC, hBitmap, 0, h, buffer, ctypes.byref(bmi), 0)
-        img = Image.frombuffer('RGBA', (w, h), buffer, 'raw', 'BGRA', 0, 1).convert('RGB')
-        gdi32.SelectObject(hMemDC, hOldBitmap)
-        gdi32.DeleteObject(hBitmap)
-        gdi32.DeleteDC(hMemDC)
-        user32.ReleaseDC(0, hScreenDC)
-        return img
+        hMemDC = 0
+        hBitmap = 0
+        hOldBitmap = 0
+        try:
+            hMemDC = gdi32.CreateCompatibleDC(hScreenDC)
+            hBitmap = gdi32.CreateCompatibleBitmap(hScreenDC, w, h)
+            hOldBitmap = gdi32.SelectObject(hMemDC, hBitmap)
+            gdi32.BitBlt(hMemDC, 0, 0, w, h, hScreenDC, x, y, SRCCOPY)
+            bmi = BITMAPINFOHEADER()
+            bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.biWidth = w
+            bmi.biHeight = -h
+            bmi.biPlanes = 1
+            bmi.biBitCount = 32
+            bmi.biCompression = 0
+            buf_size = w * h * 4
+            buffer = (ctypes.c_char * buf_size)()
+            gdi32.GetDIBits(hMemDC, hBitmap, 0, h, buffer, ctypes.byref(bmi), 0)
+            raw_img = Image.frombuffer('RGBA', (w, h), buffer, 'raw', 'BGRA', 0, 1)
+            try:
+                return raw_img.convert('RGB')
+            finally:
+                raw_img.close()
+        finally:
+            if hMemDC and hOldBitmap:
+                gdi32.SelectObject(hMemDC, hOldBitmap)
+            if hBitmap:
+                gdi32.DeleteObject(hBitmap)
+            if hMemDC:
+                gdi32.DeleteDC(hMemDC)
+            if hScreenDC:
+                user32.ReleaseDC(0, hScreenDC)
     return with_desktop(worker)
 
 def capture_phone(target=None, out_path=None, crop_phone_screen=True, low_token=False):
@@ -306,28 +336,36 @@ def capture_phone(target=None, out_path=None, crop_phone_screen=True, low_token=
     time.sleep(0.05)
     r = win["rect"]
     img = capture_rect(r["left"], r["top"], r["width"], r["height"])
-    if crop_phone_screen and win["is_phone"]:
-        top_offset = 30
-        right_toolbar_width = 44
-        phone_w = r["width"] - right_toolbar_width
-        phone_h = r["height"] - top_offset
-        if phone_w > 50 and phone_h > 50:
-            img = img.crop((0, top_offset, phone_w, top_offset + phone_h))
+    try:
+        if crop_phone_screen and win["is_phone"]:
+            top_offset = 30
+            right_toolbar_width = 44
+            phone_w = r["width"] - right_toolbar_width
+            phone_h = r["height"] - top_offset
+            if phone_w > 50 and phone_h > 50:
+                cropped = img.crop((0, top_offset, phone_w, top_offset + phone_h))
+                img.close()
+                img = cropped
 
-    if low_token and img.height > 800:
-        ratio = 800 / img.height
-        new_w = int(img.width * ratio)
-        img = img.resize((new_w, 800), Image.Resampling.LANCZOS)
+        if low_token and img.height > 800:
+            ratio = 800 / img.height
+            new_w = int(img.width * ratio)
+            resized = img.resize((new_w, 800), Image.Resampling.LANCZOS)
+            img.close()
+            img = resized
 
-    if not out_path:
-        out_path = os.path.join(os.getcwd(), "phone_screen.png")
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    img.save(out_path, optimize=True)
+        if not out_path:
+            out_path = os.path.join(os.getcwd(), "phone_screen.png")
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+        img.save(out_path, optimize=True)
+        size = [img.width, img.height]
+    finally:
+        img.close()
     return {
         "status": "success",
         "file": os.path.abspath(out_path),
         "window": win["title"],
-        "size": [img.width, img.height]
+        "size": size
     }
 
 def run_ocr(image_path):
@@ -355,34 +393,38 @@ def capture_and_annotate(target=None, out_path=None, low_token=False):
     img_path = clean_cap["file"]
     words = run_ocr(img_path)
 
-    img = Image.open(img_path).convert("RGB")
-    draw = ImageDraw.Draw(img)
+    with Image.open(img_path) as src_img:
+        img = src_img.convert("RGB")
+    try:
+        draw = ImageDraw.Draw(img)
 
-    filtered = [w for w in words if len(w.get("text", "").strip()) > 1]
-    marks = {}
-    summary_list = []
+        filtered = [w for w in words if len(w.get("text", "").strip()) > 1]
+        marks = {}
+        summary_list = []
 
-    for idx, w in enumerate(filtered, 1):
-        x, y, bw, bh = w["x"], w["y"], w["w"], w["h"]
-        center_x = x + (bw / 2)
-        center_y = y + (bh / 2)
-        norm_x = round(center_x / img.width, 3)
-        norm_y = round(center_y / img.height, 3)
+        for idx, w in enumerate(filtered, 1):
+            x, y, bw, bh = w["x"], w["y"], w["w"], w["h"]
+            center_x = x + (bw / 2)
+            center_y = y + (bh / 2)
+            norm_x = round(center_x / img.width, 3)
+            norm_y = round(center_y / img.height, 3)
 
-        mark_data = {
-            "text": w["text"],
-            "box": [x, y, bw, bh],
-            "norm": [norm_x, norm_y]
-        }
-        marks[str(idx)] = mark_data
-        summary_list.append(f"[{idx}] \"{w['text']}\" ({norm_x}, {norm_y})")
+            mark_data = {
+                "text": w["text"],
+                "box": [x, y, bw, bh],
+                "norm": [norm_x, norm_y]
+            }
+            marks[str(idx)] = mark_data
+            summary_list.append(f"[{idx}] \"{w['text']}\" ({norm_x}, {norm_y})")
 
-        draw.rectangle([x, y, x + bw, y + bh], outline="#00E5FF", width=2)
-        draw.rectangle([x, max(0, y - 14), x + 20, y], fill="#00E5FF")
-        draw.text((x + 2, max(0, y - 14)), str(idx), fill="black")
+            draw.rectangle([x, y, x + bw, y + bh], outline="#00E5FF", width=2)
+            draw.rectangle([x, max(0, y - 14), x + 20, y], fill="#00E5FF")
+            draw.text((x + 2, max(0, y - 14)), str(idx), fill="black")
 
-    annotated_path = img_path.replace(".png", "_annotated.png") if ".png" in img_path else img_path + "_annotated.png"
-    img.save(annotated_path, optimize=True)
+        annotated_path = img_path.replace(".png", "_annotated.png") if ".png" in img_path else img_path + "_annotated.png"
+        img.save(annotated_path, optimize=True)
+    finally:
+        img.close()
 
     with open(MARKS_CACHE_PATH, "w", encoding="utf-8") as f:
         json.dump({"window": clean_cap["window"], "marks": marks}, f, indent=2)
@@ -422,18 +464,37 @@ def wait_screen_stable(target=None, timeout=6.0, poll_interval=0.35, threshold=0
         raise RuntimeError("Pillow is required for image operations. Install with 'pip install pillow'")
     start_time = time.time()
     last_img = None
-    while (time.time() - start_time) < timeout:
-        res = capture_phone(target=target, out_path=os.path.join(SCRIPT_DIR, ".temp_stable.png"))
-        img = Image.open(res["file"])
+    temp_path = os.path.join(SCRIPT_DIR, ".temp_stable.png")
+    try:
+        while (time.time() - start_time) < timeout:
+            res = capture_phone(target=target, out_path=temp_path)
+            img = Image.open(res["file"])
+            if last_img is not None:
+                diff = ImageChops.difference(img, last_img)
+                try:
+                    diff_pixels = sum(1 for p in diff.getdata() if any(c > 20 for c in p))
+                    ratio = diff_pixels / (img.width * img.height)
+                finally:
+                    diff.close()
+                last_img.close()
+                last_img = None
+                if ratio < threshold:
+                    img.close()
+                    return {"status": "success", "stable": True, "elapsed": round(time.time() - start_time, 2)}
+            last_img = img
+            time.sleep(poll_interval)
+        return {"status": "success", "stable": False, "timeout": timeout}
+    finally:
         if last_img is not None:
-            diff = ImageChops.difference(img, last_img)
-            diff_pixels = sum(1 for p in diff.getdata() if any(c > 20 for c in p))
-            ratio = diff_pixels / (img.width * img.height)
-            if ratio < threshold:
-                return {"status": "success", "stable": True, "elapsed": round(time.time() - start_time, 2)}
-        last_img = img
-        time.sleep(poll_interval)
-    return {"status": "success", "stable": False, "timeout": timeout}
+            try:
+                last_img.close()
+            except Exception:
+                pass
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
 # ---------------------------------------------------------
 # Touch, Gestures, Typing & Navigation
@@ -524,16 +585,32 @@ def set_clipboard_text(text):
         raise RuntimeError("Clipboard operations are only supported on Windows host.")
     text_bytes = (text + '\0').encode('utf-16le')
     h_mem = kernel32.GlobalAlloc(0x0042, len(text_bytes))
+    if not h_mem:
+        raise RuntimeError("GlobalAlloc failed to allocate clipboard memory.")
     p_mem = kernel32.GlobalLock(h_mem)
-    ctypes.memmove(p_mem, text_bytes, len(text_bytes))
-    kernel32.GlobalUnlock(h_mem)
+    if not p_mem:
+        kernel32.GlobalFree(h_mem)
+        raise RuntimeError("GlobalLock failed on clipboard handle.")
+    try:
+        ctypes.memmove(p_mem, text_bytes, len(text_bytes))
+    finally:
+        kernel32.GlobalUnlock(h_mem)
+    opened = False
     for _ in range(10):
         if user32.OpenClipboard(0):
+            opened = True
             break
         time.sleep(0.03)
-    user32.EmptyClipboard()
-    user32.SetClipboardData(13, h_mem)
-    user32.CloseClipboard()
+    if not opened:
+        kernel32.GlobalFree(h_mem)
+        raise RuntimeError("Failed to open Windows clipboard after 10 retries.")
+    try:
+        user32.EmptyClipboard()
+        if not user32.SetClipboardData(13, h_mem):
+            kernel32.GlobalFree(h_mem)
+            raise RuntimeError("SetClipboardData failed.")
+    finally:
+        user32.CloseClipboard()
 
 def type_text(text, target=None):
     win = find_target_window(target, prefer_phone=True)
@@ -619,27 +696,29 @@ def wait_and_click_text(query, target=None, timeout=30.0, poll_interval=1.2):
         time.sleep(poll_interval)
     return {"status": "error", "message": f"Timeout waiting for text '{query}'"}
 
-def scroll_find(query, max_swipes=5, click=True, target=None):
+def scroll_find(query, max_swipes=5, click=True, target=None, skip_initial_check=False):
     """
     Autonomous Cost/Time Saver:
     Repeatedly scans for query. If found, clicks it immediately.
     If not, smoothly swipes down and repeats. Accomplishes what used to take 5 agent turns in 1 call!
+    When skip_initial_check is True, skips OCR on the initial un-scrolled screen (saving 1 redundant capture+OCR pass).
     """
     for swipe_idx in range(max_swipes + 1):
-        res = find_text_on_screen(query, target=target)
-        if res["matches"]:
-            match = res["matches"][0]
-            norm_x, norm_y = match["norm_center"]
-            if click:
-                tap(norm_x, norm_y, target=target, normalized=True)
-            return {
-                "status": "success",
-                "found": True,
-                "clicked": click,
-                "matched": match["text"],
-                "coords": [norm_x, norm_y],
-                "swipes_performed": swipe_idx
-            }
+        if not (swipe_idx == 0 and skip_initial_check):
+            res = find_text_on_screen(query, target=target)
+            if res["matches"]:
+                match = res["matches"][0]
+                norm_x, norm_y = match["norm_center"]
+                if click:
+                    tap(norm_x, norm_y, target=target, normalized=True)
+                return {
+                    "status": "success",
+                    "found": True,
+                    "clicked": click,
+                    "matched": match["text"],
+                    "coords": [norm_x, norm_y],
+                    "swipes_performed": swipe_idx
+                }
         if swipe_idx < max_swipes:
             # Swipe up to scroll down
             swipe(0.5, 0.72, 0.5, 0.35, target=target, normalized=True)
@@ -1157,10 +1236,9 @@ def smart_click(query, target=None, scroll_fallback=True):
     """Multi-Path Fallback Element Grounding & Clicking (inspired by MobileRun & AppAgent v2):
     Path 1: Structural UI Accessibility Tree (ADB UIAutomator XML bounds)
     Path 2: Local Windows Native OCR (click_text_on_screen)
-    Path 3: Autonomous Scroll-Find OCR Loop (scroll_find)
+    Path 3: Autonomous Scroll-Find OCR Loop (scroll_find with skip_initial_check=True)
     Path 4: Pre-Calibrated Normalized Coordinate Anchor Fallback
     """
-    import re
     paths_tried = []
     q_clean = str(query).strip()
     q_lower = q_clean.lower()
@@ -1171,12 +1249,11 @@ def smart_click(query, target=None, scroll_fallback=True):
         ui_res = dump_ui_tree()
         if ui_res.get("status") == "success" and ui_res.get("xml"):
             xml_str = ui_res["xml"]
-            node_pattern = re.compile(r'<node[^>]+>', re.IGNORECASE)
-            for node_match in node_pattern.finditer(xml_str):
+            for node_match in RE_XML_NODE.finditer(xml_str):
                 node_tag = node_match.group(0)
-                text_m = re.search(r'text="([^"]*)"', node_tag)
-                desc_m = re.search(r'content-desc="([^"]*)"', node_tag)
-                bounds_m = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', node_tag)
+                text_m = RE_XML_TEXT.search(node_tag)
+                desc_m = RE_XML_DESC.search(node_tag)
+                bounds_m = RE_XML_BOUNDS.search(node_tag)
                 node_text = (text_m.group(1) if text_m else "") + " " + (desc_m.group(1) if desc_m else "")
                 if q_lower in node_text.lower() and bounds_m:
                     x1, y1, x2, y2 = map(int, bounds_m.groups())
@@ -1210,11 +1287,11 @@ def smart_click(query, target=None, scroll_fallback=True):
     except Exception:
         pass
 
-    # Path 3: Autonomous Scroll-Find Loop
+    # Path 3: Autonomous Scroll-Find Loop (skip_initial_check=True avoids re-OCR-ing the current screen)
     if scroll_fallback:
         paths_tried.append("scroll_find_ocr")
         try:
-            sf_res = scroll_find(q_clean, max_swipes=3, click=True, target=target)
+            sf_res = scroll_find(q_clean, max_swipes=3, click=True, target=target, skip_initial_check=True)
             if sf_res.get("status") == "success":
                 return {
                     "status": "success",
@@ -1346,7 +1423,6 @@ def execute_natural_prompt(prompt_text, target=None):
     Translates casual natural language prompts (from x.ai/bot, Telegram, small LLMs, or humans)
     into deterministic GeeLark recipes, batch steps, or multi-path actions.
     """
-    import re
     if not prompt_text or not str(prompt_text).strip():
         return {"status": "error", "message": "Empty prompt provided"}
 
@@ -1354,7 +1430,7 @@ def execute_natural_prompt(prompt_text, target=None):
     low = raw.lower()
 
     # 1. Extract profile / phone number if mentioned (e.g., "on profile 4", "phone #2")
-    prof_match = re.search(r'(?:profile|phone|window|#)\s*(\d+)', low)
+    prof_match = RE_PROFILE_NUM.search(low)
     eff_target = target
     profile_locked = None
     if prof_match:
@@ -1363,13 +1439,13 @@ def execute_natural_prompt(prompt_text, target=None):
         set_active_target(profile_locked)
 
     # 2. Extract URL if present
-    url_match = re.search(r"(https?://[^\s\"'<>]+)", raw)
+    url_match = RE_URL.search(raw)
     extracted_url = url_match.group(1) if url_match else None
 
     # 3. Route by semantic intent
     # Case A: TikTok Warmup / Feed
     if "tiktok" in low and any(w in low for w in ["watch", "feed", "warm", "video", "scroll", "swipe", "like"]):
-        vid_match = re.search(r'(\d+)\s*(?:tiktok|video|vid|clip)', low)
+        vid_match = RE_VIDEO_COUNT.search(low)
         videos = int(vid_match.group(1)) if vid_match else 5
         like_ratio = 0.5 if "like" in low else 0.25
         res = recipe_tiktok_feed(videos=videos, like_ratio=like_ratio, target=eff_target)
@@ -1417,14 +1493,14 @@ def execute_natural_prompt(prompt_text, target=None):
         return {"status": "success", "transpiled_intent": "key:back", "profile": eff_target, "result": res}
 
     # Case H: Open App
-    app_match = re.search(r'\b(?:open|launch|start)\s+(youtube|tiktok|chrome|settings|playstore|files)\b', low)
+    app_match = RE_OPEN_APP.search(low)
     if app_match:
         app_name = app_match.group(1)
         res = open_app(app_name, target=eff_target)
         return {"status": "success", "transpiled_intent": f"open-app:{app_name}", "profile": eff_target, "result": res}
 
     # Case I: Type Text
-    type_match = re.search(r"(?:type|write|input|search\s+for)\s+[\"']?([^\"']+)[\"']?", raw, re.IGNORECASE)
+    type_match = RE_TYPE_TEXT.search(raw)
     if type_match:
         txt = type_match.group(1).strip()
         res = type_text(txt, target=eff_target)
@@ -1433,7 +1509,7 @@ def execute_natural_prompt(prompt_text, target=None):
         return {"status": "success", "transpiled_intent": "type", "text": txt, "profile": eff_target, "result": res}
 
     # Case J: Click / Tap Element by Name (Smart Multi-Path Click)
-    click_match = re.search(r"(?:click|tap|press|select)\s+(?:on\s+)?[\"']?([^\"']+)[\"']?", raw, re.IGNORECASE)
+    click_match = RE_CLICK_TEXT.search(raw)
     if click_match:
         query = click_match.group(1).strip()
         res = smart_click(query, target=eff_target)

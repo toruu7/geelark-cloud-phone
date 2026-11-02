@@ -313,6 +313,55 @@ class TestWebhookBridge(unittest.TestCase):
             self.assertFalse(out_call["result"]["isError"])
             self.assertIn("success", out_call["result"]["content"][0]["text"])
 
+    def test_post_oversized_payload_rejected_for_memory_safety(self):
+        """Verify payloads larger than MAX_BODY_BYTES are rejected immediately."""
+        huge_len = str(webhook_bridge.MAX_BODY_BYTES + 1024)
+        handler = self._create_handler("POST", "/run", headers={"Content-Length": huge_len})
+        handler.do_POST()
+        handler.send_response.assert_called_with(400)
+        output = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(output["status"], "error")
+        self.assertIn("Payload too large", output["message"])
+
+    def test_mcp_stdio_rpc_handler_methods(self):
+        """Verify scripts/mcp_stdio.py handles initialize, ping, tools/list, tools/call, and unknown methods."""
+        import mcp_stdio
+
+        # 1. initialize
+        res_init = mcp_stdio.handle_rpc_message({"jsonrpc": "2.0", "id": 10, "method": "initialize"})
+        self.assertEqual(res_init["result"]["serverInfo"]["name"], "geelark-cloud-phone")
+
+        # 2. ping
+        res_ping = mcp_stdio.handle_rpc_message({"jsonrpc": "2.0", "id": 11, "method": "ping"})
+        self.assertEqual(res_ping["result"], {})
+
+        # 3. notifications/initialized returns None
+        self.assertIsNone(mcp_stdio.handle_rpc_message({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+
+        # 4. tools/list
+        res_list = mcp_stdio.handle_rpc_message({"jsonrpc": "2.0", "id": 12, "method": "tools/list"})
+        self.assertEqual(len(res_list["result"]["tools"]), 3)
+
+        # 5. tools/call (geelark_smart_click)
+        with patch.object(mcp_stdio, "run_cli", return_value=(0, '{"status": "success"}')) as mock_cli:
+            res_call = mcp_stdio.handle_rpc_message({
+                "jsonrpc": "2.0",
+                "id": 13,
+                "method": "tools/call",
+                "params": {"name": "geelark_smart_click", "arguments": {"query": "Skip", "window": "4"}}
+            })
+            self.assertFalse(res_call["result"]["isError"])
+            mock_cli.assert_called_once_with("smart-click", ["Skip", "--window", "4"])
+
+        # 6. Unknown tool returns -32601 error
+        res_unk_tool = mcp_stdio.handle_rpc_message({
+            "jsonrpc": "2.0",
+            "id": 14,
+            "method": "tools/call",
+            "params": {"name": "nonexistent_tool", "arguments": {}}
+        })
+        self.assertEqual(res_unk_tool["error"]["code"], -32601)
+
 
 if __name__ == "__main__":
     unittest.main()
