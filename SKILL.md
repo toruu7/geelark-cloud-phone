@@ -3,7 +3,7 @@ name: geelark-cloud-phone
 description: Control and inspect GeeLark cloud phones on a Windows host - capture the screen, tap, swipe, type, press Back/Home, open apps and links, and click UI text via ADB or local OCR. Use when the user wants to operate, test, or automate a GeeLark phone profile.
 metadata:
   author: toruu7
-  version: "4.3.0"
+  version: "4.4.0"
   license: MIT
   platform: windows
   repository: https://github.com/toruu7/geelark-cloud-phone
@@ -66,10 +66,18 @@ Use normalized coordinates (`--norm`, 0.0 to 1.0) so results do not depend on wi
 - **OCR** is Windows' built-in engine: it only reads languages installed on the host and misses stylized text. If `find-text` fails, try `capture` and read the screenshot yourself.
 - **Several phones open**: always `use <profile>` first; commands never fall back to a different phone than the one targeted.
 
+## Bulk runs over ADB (many phones + Google Sheet)
+
+`gl bulk-run` works through a task queue on every connected phone in parallel (ADB only, no mouse takeover) and reports each result (success, failed, timeout, offline, ...) to a Google Sheet and `logs/`. Setup, task format and actions: [references/bulk_automation.md](references/bulk_automation.md).
+- **Before any real run**: `gl bulk-check`, then `gl bulk-run --tasks <file> --dry-run`, show the user the task list, and get a yes. Start with `--max-tasks 1` on one phone, check the result, then scale up.
+- Bulk tasks change many accounts at once, so the safety rules above apply to every row: do not queue posting, liking, messaging, purchases, or logins without the user's explicit approval.
+- Report back from the run summary (`success` / `failed` / `other`) and the `logs/bulk-<run_id>.jsonl` path; do not claim success for tasks the report marks failed.
+
 ## Environment variables
 
 `GEELARK_ADB_DEVICE` (ADB serial), `GEELARK_INPUT_MODE` (`gui`|`adb`), `GEELARK_ADB_KEYS=0` (disable ADB key events),
 `GEELARK_ADB_TIMEOUT` (seconds, default 15), `GEELARK_LOCK_TIMEOUT` (seconds, default 60),
+`GEELARK_SHEETS_URL` and `GEELARK_SHEETS_SECRET` (bulk reporting),
 `GEELARK_API_TOKEN` and `GEELARK_CLOUD_PHONE_ID` (Cloud OpenAPI: `cloud-list`, `cloud-start`, `cloud-stop`, `cloud-status`, `cloud-api`).
 
 ## HTTP / MCP gateway (optional)

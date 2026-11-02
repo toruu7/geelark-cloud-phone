@@ -1,0 +1,19 @@
+{
+  "tasks": [
+    {"task_id": "ping-all", "action": "check-device"},
+    {"task_id": "open-settings", "action": "open-app", "params": {"name": "settings"}},
+    {"task_id": "go-home", "action": "key", "params": {"name": "home"}},
+    {
+      "task_id": "open-link-and-verify",
+      "action": "flow",
+      "params": {
+        "steps": [
+          {"action": "open-app", "name": "chrome"},
+          {"action": "deep-link", "url": "https://example.com/?id=7&src=bulk"},
+          {"action": "wait-text", "text": "Example Domain", "timeout": 20},
+          {"action": "screenshot"}
+        ]
+      }
+    }
+  ]
+}

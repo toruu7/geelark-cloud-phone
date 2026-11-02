@@ -54,6 +54,10 @@ Each step may carry `"window": "<profile>"`.
  {"action":"wait-text","query":"Skip","timeout":15}]
 ```
 
+## Bulk automation (ADB, parallel)
+`bulk-run [--tasks FILE.json|.csv] [--devices a,b] [--retries N] [--max-workers N] [--max-tasks N] [--task-timeout S] [--task-delay S] [--dry-run] [--no-sheet] [--fail-on-error]`, `bulk-check`, `bulk-flush`.
+Full guide, actions and sheet format: [bulk_automation.md](bulk_automation.md). These commands never take the desktop lock and are not exposed through the HTTP bridge.
+
 ## Cloud OpenAPI (optional)
 Needs `GEELARK_API_TOKEN` (or `--token`). Requests are retried on 429/5xx/network errors; non-zero API codes are returned as `status: error`.
 `cloud-list`, `cloud-start <id>`, `cloud-stop <id>`, `cloud-status <id>`, and `cloud-api /open/v1/... --data '{...}'` for any other endpoint (path must start with `/open/`).
@@ -70,6 +74,7 @@ Check GeeLark's current OpenAPI docs for endpoint names and body shapes before u
 | `GEELARK_LOCK_TIMEOUT` / `GEELARK_LOCK_PATH` | Cross-process lock wait (default 60 s) and lock file. |
 | `GEELARK_API_TOKEN`, `GEELARK_CLOUD_PHONE_ID` | Cloud OpenAPI. |
 | `GEELARK_BRIDGE_TOKEN` | Bearer token for the HTTP bridge. |
+| `GEELARK_SHEETS_URL`, `GEELARK_SHEETS_SECRET` | Apps Script web app URL and its secret, for `bulk-run` / `bulk-check` / `bulk-flush`. |
 
 ## Edge cases
 | Scenario | What to do |

@@ -189,6 +189,11 @@ def get_feature_manifest():
                 "description": "Obstacle detection, render stability checking, and emergency recovery",
                 "commands": ["wait-stable", "dismiss-popup", "recover"]
             },
+            "bulk_automation": {
+                "description": "ADB-only parallel task runner: one worker per phone, tasks from a Google Sheet queue or JSON/CSV file, every outcome reported to the sheet and a local log",
+                "commands": ["bulk-run", "bulk-check", "bulk-flush"],
+                "features": ["Sheet-as-queue via Apps Script", "Per-task retries, timeouts, offline detection", "Local JSONL log + offline report spool", "No mouse takeover"]
+            },
             "external_integrations": {
                 "description": "HTTP Webhook bridge and n8n workflows for Docker and orchestrator triggers",
                 "commands": ["webhook_bridge", "n8n-trigger"],

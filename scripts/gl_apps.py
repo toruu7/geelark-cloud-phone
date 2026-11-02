@@ -14,7 +14,8 @@ def deep_link(url_or_uri, target=None):
     Directly opens YouTube videos, web links, or app schemes without UI typing!
     """
     # 1. Try fast ADB intent dispatch
-    adb_res = gl_adb.run_adb(["shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", url_or_uri])
+    # Quote: adb joins args and the device shell re-parses them, so a `&` in the URL would truncate it.
+    adb_res = gl_adb.run_adb(["shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", gl_adb.shell_quote(url_or_uri)])
     if adb_res["returncode"] == 0 and "Error" not in adb_res["stderr"]:
         return {"status": "success", "method": "adb_intent", "url": url_or_uri}
 

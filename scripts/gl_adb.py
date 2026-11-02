@@ -5,6 +5,7 @@ Input injected through ADB does not move the physical mouse or need the phone wi
 
 import os
 import re
+import shlex
 import subprocess
 import time
 
@@ -65,6 +66,39 @@ def run_adb(args, device=None, timeout=None):
     except (FileNotFoundError, OSError) as e:
         return {"returncode": RC_NOT_FOUND, "stdout": "", "stderr": f"adb unavailable: {e}"}
     return {"returncode": res.returncode, "stdout": res.stdout.strip(), "stderr": res.stderr.strip()}
+
+
+def shell_quote(value):
+    """Quote one argument for the Android device shell. `adb shell a b c` joins its args with spaces and the
+    device's sh re-parses them, so unquoted `&`, `;`, `|`, `$()` or spaces in a URL/text would be interpreted."""
+    return shlex.quote(str(value))
+
+
+def run_adb_bytes(args, device=None, timeout=None):
+    """Like run_adb but returns raw stdout bytes (e.g. `exec-out screencap -p`)."""
+    args = [str(a) for a in args]
+    if device is None and args and args[0] not in _SERVERLESS:
+        device = os.environ.get("GEELARK_ADB_DEVICE", "").strip() or None
+    cmd = [adb_executable()]
+    if device and args and args[0] not in _SERVERLESS:
+        if not _SERIAL_RE.match(str(device)):
+            return {"returncode": 2, "stdout": b"", "stderr": f"Invalid adb device serial: {device!r}"}
+        cmd.extend(["-s", str(device)])
+    cmd.extend(args)
+    limit = _timeout() if timeout is None else timeout
+    try:
+        res = subprocess.run(cmd, capture_output=True, timeout=limit)
+    except subprocess.TimeoutExpired:
+        return {"returncode": RC_TIMEOUT, "stdout": b"", "stderr": f"adb timed out after {limit}s", "timed_out": True}
+    except (FileNotFoundError, OSError) as e:
+        return {"returncode": RC_NOT_FOUND, "stdout": b"", "stderr": f"adb unavailable: {e}"}
+    return {"returncode": res.returncode, "stdout": res.stdout, "stderr": res.stderr.decode("utf-8", "replace").strip()}
+
+
+def get_state(device):
+    """'device' when online, otherwise a short reason string."""
+    res = run_adb(["get-state"], device=device, timeout=8)
+    return res["stdout"] if res["returncode"] == 0 and res["stdout"] else (res["stderr"] or "offline")
 
 
 def parse_devices(stdout):

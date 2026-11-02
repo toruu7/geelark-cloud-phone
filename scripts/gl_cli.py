@@ -10,6 +10,7 @@ from gl_lock import DeviceLock, LockTimeout
 import gl_adb
 import gl_apps
 import gl_base
+import gl_bulk
 import gl_cloud
 import gl_input
 import gl_manifest
@@ -17,6 +18,7 @@ import gl_ocr
 import gl_orch
 import gl_prompt
 import gl_recipes
+import gl_sheets
 import gl_smart
 import gl_vision
 import gl_win32
@@ -27,6 +29,8 @@ import gl_win32
 LOCK_FREE_COMMANDS = {
     "features", "export-schema", "use", "status", "list-windows",
     "cloud-list", "cloud-start", "cloud-stop", "cloud-status", "cloud-api",
+    # ADB-only: never touches the mouse, windows or shared desktop cache files
+    "bulk-run", "bulk-check", "bulk-flush",
 }
 
 def main():
@@ -226,6 +230,23 @@ def main():
     p_capi.add_argument("endpoint", help="Endpoint path, e.g. /open/v1/phone/list")
     p_capi.add_argument("--data", default="{}", help="JSON request body")
     p_capi.add_argument("--token", help="GeeLark API Bearer token")
+
+    p_bulk = subparsers.add_parser("bulk-run", help="Run queued tasks on many phones in parallel over ADB and report to a Google Sheet")
+    p_bulk.add_argument("--tasks", help="JSON/CSV task file. Omit to claim tasks from the Google Sheet queue")
+    p_bulk.add_argument("--devices", help="Comma-separated ADB serials (default: all connected)")
+    p_bulk.add_argument("--retries", type=int, default=1, help="Retries per failed task (default 1)")
+    p_bulk.add_argument("--max-workers", type=int, default=8, help="Max phones worked in parallel")
+    p_bulk.add_argument("--max-tasks", type=int, help="Stop after this many tasks")
+    p_bulk.add_argument("--task-timeout", type=float, default=120.0, help="Seconds allowed per task attempt")
+    p_bulk.add_argument("--task-delay", type=float, default=0.0, help="Pause between tasks on the same phone")
+    p_bulk.add_argument("--dry-run", action="store_true", help="Validate a --tasks file and show the plan; touch nothing")
+    p_bulk.add_argument("--no-sheet", action="store_true", help="Log locally only, even if sheet env vars are set")
+    p_bulk.add_argument("--log-dir", help="Directory for run logs, screenshots and the report spool (default: ./logs)")
+    p_bulk.add_argument("--fail-on-error", action="store_true", help="Exit with code 4 if any task failed")
+
+    p_bchk = subparsers.add_parser("bulk-check", help="Check ADB devices and the Google Sheet connection")
+    p_bflush = subparsers.add_parser("bulk-flush", help="Re-send reports that could not reach the sheet earlier")
+    p_bflush.add_argument("--log-dir", help="Directory holding the report spool")
 
     args = parser.parse_args()
     if not args.command:
@@ -442,6 +463,36 @@ def main():
             if body is not None:
                 res = gl_cloud.cloud_api_request(args.endpoint, body, api_token=args.token)
             print(json.dumps(res, indent=2))
+
+        elif args.command == "bulk-run":
+            client = None if args.no_sheet else gl_sheets.SheetsClient.from_env()
+            tasks = gl_bulk.load_tasks_file(args.tasks) if args.tasks else None
+            res = gl_bulk.run_bulk(
+                tasks=tasks, client=client,
+                devices=[d.strip() for d in args.devices.split(",") if d.strip()] if args.devices else None,
+                retries=max(0, args.retries), max_workers=args.max_workers, max_tasks=args.max_tasks,
+                task_timeout=args.task_timeout, task_delay=args.task_delay, dry_run=args.dry_run, log_dir=args.log_dir)
+            print(json.dumps(res, indent=2))
+            if res.get("status") == "error":
+                sys.exit(1)
+            if args.fail_on_error and res.get("failed"):
+                sys.exit(4)
+
+        elif args.command == "bulk-check":
+            client = gl_sheets.SheetsClient.from_env()
+            devices = gl_adb.list_devices(use_cache=False)
+            sheet = {"configured": False}
+            if client:
+                ping = client.ping()
+                sheet = {"configured": True, "reachable": bool(ping.get("ok")), "error": ping.get("error")}
+            print(json.dumps({"status": "success", "adb_devices": devices, "sheet": sheet}, indent=2))
+
+        elif args.command == "bulk-flush":
+            client = gl_sheets.SheetsClient.from_env()
+            if not client:
+                print(json.dumps({"status": "error", "message": "GEELARK_SHEETS_URL / GEELARK_SHEETS_SECRET not set"}))
+                sys.exit(1)
+            print(json.dumps(dict(gl_sheets.flush_spool(client, args.log_dir), status="success"), indent=2))
 
         elif args.command == "adb":
             res = gl_adb.run_adb(args.args)
