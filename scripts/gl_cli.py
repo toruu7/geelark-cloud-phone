@@ -21,6 +21,7 @@ import gl_orch
 import gl_prompt
 import gl_recipes
 import gl_sheets
+import gl_transport
 import gl_smart
 import gl_vision
 import gl_win32
@@ -88,7 +89,8 @@ def _bulk_run(args):
             retries=max(0, cfg["retries"]), max_workers=cfg["max_workers"], max_tasks=args.max_tasks,
             task_timeout=cfg["task_timeout"], task_delay=cfg["task_delay"], dry_run=args.dry_run, log_dir=args.log_dir,
             cloud=args.cloud, max_cloud_phones=cfg["max_cloud_phones"], cloud_up_timeout=args.cloud_up_timeout,
-            only_cloud=args.only_cloud, max_runtime=cfg["max_runtime"], on_failure=cfg["on_failure"], probe=args.probe)
+            only_cloud=args.only_cloud, max_runtime=cfg["max_runtime"], on_failure=cfg["on_failure"], probe=args.probe,
+            transport=getattr(args, "transport", None) or os.environ.get("GEELARK_TRANSPORT", "").strip().lower() or "adb")
     finally:
         run_lock.release()
     if ignored:
@@ -310,6 +312,7 @@ def main():
     p_bulk.add_argument("--max-runtime", type=float, default=None, help="Seconds after which no NEW task starts (default: Settings tab, else unlimited)")
     p_bulk.add_argument("--on-failure", choices=["continue", "stop"], default=None, help="After a task fails: keep going, or skip that phone's remaining tasks (default: Settings tab, else continue)")
     p_bulk.add_argument("--probe", action="store_true", help="Only check the sheet: prints status work|idle|paused and starts nothing (lets a scheduler skip installing ADB when there is no work)")
+    p_bulk.add_argument("--transport", choices=["adb", "api"], default=None, help="How cloud phones are driven: adb (ADB over TCP, default) or api (GeeLark HTTPS API only; no ADB, works behind a web proxy). Default: $GEELARK_TRANSPORT or adb")
     p_bulk.add_argument("--only-cloud", action="store_true", help="Unattended mode: only cloud: tasks, no local ADB phones, implies --cloud; exits quietly when idle")
     p_bulk.add_argument("--dry-run", action="store_true", help="Validate a --tasks file and show the plan; touch nothing")
     p_bulk.add_argument("--no-sheet", action="store_true", help="Log locally only, even if sheet env vars are set")
@@ -322,6 +325,7 @@ def main():
     p_bchk = subparsers.add_parser("bulk-check", help="Check ADB devices and the Google Sheet connection")
     p_bstop = subparsers.add_parser("bulk-cloud-stop", help="Stop cloud phones a killed/interrupted bulk run left running (stops billing)")
     p_bstop.add_argument("--log-dir", help="Directory holding the cloud registry (default: ./logs)")
+    p_bstop.add_argument("--transport", choices=["adb", "api"], default=None, help="Stop phones via the cloud-adb skill (adb) or the GeeLark API directly (api). Default: $GEELARK_TRANSPORT or adb")
     p_bflush = subparsers.add_parser("bulk-flush", help="Re-send reports that could not reach the sheet earlier")
     p_bflush.add_argument("--log-dir", help="Directory holding the report spool")
 
@@ -554,7 +558,9 @@ def main():
             print(json.dumps({"status": "success", "adb_devices": devices, "sheet": sheet}, indent=2))
 
         elif args.command == "bulk-cloud-stop":
-            res = gl_cloudadb.stop_leftovers(args.log_dir or gl_sheets.DEFAULT_LOG_DIR)
+            mode = args.transport or os.environ.get("GEELARK_TRANSPORT", "").strip().lower() or "adb"
+            stop = gl_transport.stop_leftovers if mode == "api" else gl_cloudadb.stop_leftovers
+            res = stop(args.log_dir or gl_sheets.DEFAULT_LOG_DIR)
             print(json.dumps(dict(res, status="error" if res["failed"] else "success"), indent=2))
             if res["failed"]:
                 sys.exit(1)

@@ -21,6 +21,7 @@ import gl_adb
 import gl_base
 import gl_cloudadb
 import gl_sheets
+import gl_transport
 
 MAX_SLEEP_S = 300
 MAX_TEXT = 500
@@ -125,12 +126,16 @@ def validate_action(action, params, depth=0):
 # Execution context
 # ---------------------------------------------------------------------------
 class Ctx:
+    """Per-task context. `device` is an ADB serial (str) or a transport object (ApiTransport / AdbTransport)."""
+
     def __init__(self, device, task_id, run_id, deadline, shots_dir):
-        self.device = device
+        self.transport = device if hasattr(device, "run") else gl_transport.AdbTransport(device)
+        self.device = self.transport.label
         self.task_id = task_id
         self.run_id = run_id
         self.deadline = deadline
         self.shots_dir = shots_dir
+        self._screen = None
 
     def check(self):
         if time.monotonic() > self.deadline:
@@ -147,7 +152,35 @@ class Ctx:
 
     def adb(self, args, **kw):
         self.check()
-        return gl_adb.run_adb(args, device=self.device, **kw)
+        return self.transport.run(args, **kw)
+
+    def state(self):
+        return self.transport.state()
+
+    def screen_size(self):
+        if self._screen is None:
+            res = self.adb(["shell", "wm", "size"], timeout=10)
+            sizes = re.findall(r"(\d+)x(\d+)", res["stdout"]) if res["returncode"] == 0 else []
+            if sizes:
+                self._screen = (int(sizes[-1][0]), int(sizes[-1][1]))   # an "Override size" line, when present, is last
+        return self._screen
+
+    def tap_normalized(self, nx, ny):
+        size = self.screen_size()
+        if not size:
+            return None
+        x, y = int(float(nx) * size[0]), int(float(ny) * size[1])
+        res = self.adb(["shell", "input", "tap", x, y])
+        return {"coords": [x, y]} if res["returncode"] == 0 else None
+
+    def swipe_normalized(self, x1, y1, x2, y2, duration_ms=250):
+        size = self.screen_size()
+        if not size:
+            return None
+        w, h = size
+        pts = [int(float(x1) * w), int(float(y1) * h), int(float(x2) * w), int(float(y2) * h)]
+        res = self.adb(["shell", "input", "swipe", *pts, int(duration_ms)])
+        return {"from": pts[:2], "to": pts[2:]} if res["returncode"] == 0 else None
 
 
 def ok(message="ok", output=None):
@@ -166,7 +199,7 @@ def _adb_error(res):
 # UI tree helpers (uiautomator dump)
 # ---------------------------------------------------------------------------
 def foreground_package(ctx):
-    res = ctx.adb(["shell", "dumpsys", "window"], timeout=20)
+    res = ctx.adb(["shell", "dumpsys", "window", "|", "grep", "-E", gl_adb.shell_quote("mCurrentFocus|mFocusedApp")], timeout=20)
     if res["returncode"] != 0:
         return None
     m = re.search(r"mCurrentFocus=Window\{[^}]*?\s(\S+?)/", res["stdout"]) or \
@@ -289,7 +322,7 @@ def _v_tap(p):
 
 
 def _r_tap(ctx, p):
-    hit = gl_adb.tap_normalized(ctx.device, p["x"], p["y"])
+    hit = ctx.tap_normalized(p["x"], p["y"])
     return ok("tapped", hit) if hit else fail("tap failed (could not read screen size or send input)")
 
 
@@ -300,7 +333,7 @@ def _v_swipe(p):
 
 
 def _r_swipe(ctx, p):
-    hit = gl_adb.swipe_normalized(ctx.device, p["x1"], p["y1"], p["x2"], p["y2"], duration_ms=int(_num(p, "duration_ms", 50, 3000, 300)))
+    hit = ctx.swipe_normalized(p["x1"], p["y1"], p["x2"], p["y2"], duration_ms=int(_num(p, "duration_ms", 50, 3000, 300)))
     return ok("swiped", hit) if hit else fail("swipe failed (could not read screen size or send input)")
 
 
@@ -334,16 +367,18 @@ def _v_screenshot(p):
 
 
 def _r_screenshot(ctx, p):
-    res = gl_adb.run_adb_bytes(["exec-out", "screencap", "-p"], device=ctx.device, timeout=25)
-    data = res["stdout"]
-    if res["returncode"] != 0 or not data.startswith(b"\x89PNG"):
-        return fail("screencap failed", {"stderr": res["stderr"][:200]})
+    res = ctx.transport.screenshot()
+    data = res["stdout"] or b""
+    ext = "png" if data.startswith(b"\x89PNG") else ("jpg" if data.startswith(b"\xff\xd8\xff") else None)
+    if res["returncode"] != 0 or not ext:
+        return fail("screenshot failed", {"stderr": str(res["stderr"])[:200]})
     os.makedirs(ctx.shots_dir, exist_ok=True)
-    name = SAFE_NAME_RE.sub("_", f"{ctx.task_id}-{ctx.device}") + ".png"
+    name = SAFE_NAME_RE.sub("_", f"{ctx.task_id}-{ctx.device}") + "." + ext
     path = os.path.join(ctx.shots_dir, name)
     with open(path, "wb") as f:
         f.write(data)
-    return ok("screenshot saved", {"path": path, "bytes": len(data)})
+    host = getattr(ctx.transport, "last_download_host", None)
+    return ok("screenshot saved", {"path": path, "bytes": len(data), **({"download_host": host} if host else {})})
 
 
 def _v_ui_text(p):
@@ -397,7 +432,7 @@ def _v_check(p):
 
 
 def _r_check(ctx, p):
-    state = gl_adb.get_state(ctx.device)
+    state = ctx.state()
     if state != "device":
         return fail(f"device state: {state}")
     model = ctx.adb(["shell", "getprop", "ro.product.model"], timeout=8)["stdout"]
@@ -536,10 +571,10 @@ def execute_task(device, task, run_id, retries, task_timeout, shots_dir, reporte
         deadline = time.monotonic() + task_timeout
         ctx = Ctx(device, task["task_id"], run_id, deadline, shots_dir)
         try:
-            state = gl_adb.get_state(device)
+            state = ctx.state()
             if state != "device":
                 time.sleep(2)
-                state = gl_adb.get_state(device)
+                state = ctx.state()
             if state != "device":
                 result, status = fail(f"device offline ({state})"), "offline"
             else:
@@ -556,7 +591,7 @@ def execute_task(device, task, run_id, retries, task_timeout, shots_dir, reporte
         if status == "success":
             break
         if attempt <= retries:
-            reporter.event("warning", f"attempt {attempt} {status}: {result['message']}; retrying", device, task["task_id"])
+            reporter.event("warning", f"attempt {attempt} {status}: {result['message']}; retrying", getattr(device, "label", device), task["task_id"])
             time.sleep(min(2 ** attempt, 10))
     reporter.report(task, status, attempts, time.monotonic() - started, result["message"], result.get("output"))
     return status
@@ -565,7 +600,7 @@ def execute_task(device, task, run_id, retries, task_timeout, shots_dir, reporte
 def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, max_tasks=None,
              task_timeout=120, task_delay=0.0, dry_run=False, log_dir=None, run_id=None,
              cloud=False, max_cloud_phones=2, cloud_up_timeout=180,
-             only_cloud=False, max_runtime=None, on_failure="continue", probe=False):
+             only_cloud=False, max_runtime=None, on_failure="continue", probe=False, transport="adb"):
     """Run tasks in parallel, one worker per phone. `tasks` = local list; otherwise tasks are claimed from `client`'s sheet.
 
     Local ADB phones are addressed by serial. GeeLark cloud phones are addressed as `cloud:<phone_id>`; they are only
@@ -574,6 +609,8 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
     Unattended use: `only_cloud=True` ignores local ADB phones and tasks without a `cloud:` device. A sheet run with
     nothing to do returns {"status": "idle"} without writing anything, so polling it every few minutes is free.
     `max_runtime` (seconds) stops *new* tasks from starting; `on_failure="stop"` skips a phone's remaining tasks after one fails."""
+    if transport not in ("adb", "api"):
+        return {"status": "error", "message": "transport must be 'adb' or 'api'"}
     run_id = run_id or f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
     started = gl_sheets.now_iso()
     local_mode = tasks is not None
@@ -657,6 +694,10 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
         reporter.report({"task_id": str((raw or {}).get("task_id", "")) if isinstance(raw, dict) else "",
                          "device": "", "action": str((raw or {}).get("action", "")) if isinstance(raw, dict) else ""},
                         "error", 0, 0, f"invalid task: {err}")
+
+    # cloud phones are started/stopped over ADB (via the cloud-adb skill) or purely over GeeLark's HTTPS API
+    up_fn = gl_transport.cloud_up if transport == "api" else gl_cloudadb.cloud_up
+    down_fn = gl_transport.cloud_down if transport == "api" else gl_cloudadb.cloud_down
 
     lock = threading.Lock()
     deadline = (time.monotonic() + max_runtime) if max_runtime else None
@@ -751,7 +792,7 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
             if name in cloud_state["stopped"] or name not in cloud_state["started"]:
                 return
         try:
-            gl_cloudadb.cloud_down(pid, reporter.log_dir)
+            down_fn(pid, reporter.log_dir)
             with lock:
                 cloud_state["stopped"].add(name)
             reporter.event("info", f"cloud phone {pid} stopped", name)
@@ -770,8 +811,8 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
             cloud_state["started"].add(name)  # recorded before `up` so a half-started phone is still stopped
         try:
             reporter.event("info", f"starting cloud phone {pid} (billing starts)", name)
-            serial = gl_cloudadb.cloud_up(pid, reporter.log_dir, cloud_up_timeout)
-            reporter.event("info", f"cloud phone {pid} ready as {serial} after {time.monotonic() - t0:.0f}s", name)
+            serial = up_fn(pid, reporter.log_dir, cloud_up_timeout)
+            reporter.event("info", f"cloud phone {pid} ready as {getattr(serial, 'label', serial)} after {time.monotonic() - t0:.0f}s", name)
             work(name, serial, True)
         except gl_cloudadb.CloudError as e:
             reporter.event("error", str(e), name)
@@ -820,6 +861,7 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
     return {"status": "success", "run_id": run_id, "workers": [n for n, _ in workers], "total": summary["total"],
             "success": summary["success"], "failed": summary["failed"], "other": summary["other"],
             "log": reporter.log_path, "sheet_write_failures": reporter.sheet_failures, "interrupted": interrupted,
+            "transport": transport,
             "cloud": {"started": sorted(cloud_state["started"]), "stopped": sorted(cloud_state["stopped"]),
                       "stop_failures": cloud_state["stop_failures"],
                       "phone_minutes": round(cloud_state["billed_s"] / 60, 1)}}

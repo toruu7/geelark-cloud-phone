@@ -18,7 +18,7 @@ The plan (which phones, which tasks, in what order, limits, pause switch) lives 
 
 ## Steps (from the repository root)
 
-1. **Preconditions.** Check `python3 --version`, `adb version` (if adb is missing run `apt-get update && apt-get install -y adb`; the update matters, because a fresh sandbox has empty package lists and a plain install fails with "Unable to locate package"), and that the three variables above are SET. If something is missing, stop and report exactly what (nothing has started yet).
+1. **Preconditions.** Check `python3 --version` and that the three variables above are SET. If `GEELARK_TRANSPORT` is `api`, no adb is needed (everything goes over HTTPS). Otherwise check `adb version` (if missing run `apt-get update && apt-get install -y adb`; the update matters, because a fresh sandbox has empty package lists). If something is missing, stop and report exactly what (nothing has started yet).
 
 2. **Is there work?**
    `python3 scripts/geelark.py bulk-run --only-cloud --probe`
@@ -36,6 +36,7 @@ The plan (which phones, which tasks, in what order, limits, pause switch) lives 
    `python3 scripts/geelark.py bulk-cloud-stop`
    Then for every phone in `cloud.started` that is not in `cloud.stopped`, or whenever `cloud.stop_failures` is not empty, or the runner crashed without output, stop each phone by id:
    `python3 .claude/skills/geelark-cloud-adb/scripts/geelark_adb.py down --id <phone id>`
+   (If adb is unavailable and `GEELARK_TRANSPORT=api`, `python3 scripts/geelark.py bulk-cloud-stop` already stops by API; if a phone still fails, report it.)
    Retry a failed stop up to 3 times. If a phone still cannot be stopped, say so prominently in the report: it may still be billing.
 
 6. **Report** in a few lines: what ran (or why nothing ran), counts of OK / failed / other, phone-minutes, whether every phone was confirmed stopped, and anything that needs a human (failed tasks and why, stop failures, missing setup). Do not include secrets. Point to the sheet's Overview and Reports tabs for detail.
@@ -43,4 +44,4 @@ The plan (which phones, which tasks, in what order, limits, pause switch) lives 
 ## Reference
 - The runner: `scripts/geelark.py bulk-run` (see `references/unattended.md`). Exit codes: 0 finished/idle/paused/busy, 1 could not run, 4 failures.
 - The phone skill: `.claude/skills/geelark-cloud-adb/SKILL.md` (commands: up, down, status, shot, ui, tap-text, key, focus).
-- Needed environment variables: `GEELARK_API_TOKEN`, `GEELARK_SHEETS_URL`, `GEELARK_SHEETS_SECRET`.
+- Needed environment variables: `GEELARK_API_TOKEN`, `GEELARK_SHEETS_URL`, `GEELARK_SHEETS_SECRET`; optional `GEELARK_TRANSPORT=api` (HTTPS-only, no adb; required in a Claude cloud environment, which blocks raw TCP).

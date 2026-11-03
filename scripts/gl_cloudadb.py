@@ -127,12 +127,13 @@ def cloud_down(pid, log_dir, attempts=3):
     raise CloudError(f"FAILED to stop cloud phone {pid} (it may still be billing): {last}")
 
 
-def stop_leftovers(log_dir):
+def stop_leftovers(log_dir, down_fn=None):
     """Stop every phone a previous, interrupted run left registered. Returns {stopped: [...], failed: [...]}."""
     stopped, failed = [], []
+    down = down_fn or cloud_down
     for pid in list(leftover_phones(log_dir)):
         try:
-            cloud_down(pid, log_dir)
+            down(pid, log_dir)
             stopped.append(pid)
         except CloudError as e:
             failed.append({"id": pid, "error": str(e)})
