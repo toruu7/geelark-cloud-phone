@@ -89,6 +89,12 @@ class FakeSheet:
     def pending_devices(self):
         return sorted({t.get("device") for t in self.queue if t.get("device")})
 
+    def pending_summary(self):
+        return {"devices": self.pending_devices(), "blank": len([t for t in self.queue if not t.get("device")])}
+
+    def settings(self):
+        return {}
+
     def call(self, verb, **payload):
         if self.reject_writes:
             return {"ok": False, "error": "request_failed"}
@@ -429,7 +435,7 @@ class TestRunner(PatchedCase):
 
     def test_sheet_claim_failure_stops_worker_and_is_logged(self):
         self.use_fake(FakeAdb(devices=("A",)))
-        sheet = FakeSheet(claim_error=True)
+        sheet = FakeSheet([{"task_id": "x", "action": "key", "params": '{"name":"home"}'}], claim_error=True)  # waiting task => not idle
         res = gl_bulk.run_bulk(client=sheet, log_dir=self.tmp.name)
         self.assertEqual(res["total"], 0)
         self.assertEqual(len([l for l in sheet.logs if "could not fetch tasks" in l["message"]]), 3)

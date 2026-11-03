@@ -1,5 +1,7 @@
 # Bulk automation (ADB) with Google Sheets, local and cloud phones
 
+> Running the same routine every day with the PC off? See [unattended.md](unattended.md) (Routine tab with dropdowns, daily schedule, dashboard, email report, VPS / GitHub Actions). This page covers the task queue itself.
+
 Run the same kind of task on many phones in parallel, with a Google Sheet as the **task queue** and the **report log**.
 
 ```

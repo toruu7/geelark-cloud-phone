@@ -3,7 +3,7 @@ name: geelark-cloud-phone
 description: Control and inspect GeeLark cloud phones on a Windows host - capture the screen, tap, swipe, type, press Back/Home, open apps and links, and click UI text via ADB or local OCR. Use when the user wants to operate, test, or automate a GeeLark phone profile.
 metadata:
   author: toruu7
-  version: "4.5.0"
+  version: "4.6.0"
   license: MIT
   platform: windows
   repository: https://github.com/toruu7/geelark-cloud-phone
@@ -72,6 +72,7 @@ Use normalized coordinates (`--norm`, 0.0 to 1.0) so results do not depend on wi
 - **Before any real run**: `gl bulk-check`, then `gl bulk-run --tasks <file> --dry-run`, show the user the task list, and get a yes. Start with `--max-tasks 1` on one phone, check the result, then scale up.
 - Bulk tasks change many accounts at once, so the safety rules above apply to every row: do not queue posting, liking, messaging, purchases, or logins without the user's explicit approval.
 - **Cloud phones** (`device` = `cloud:<phone_id>` in the sheet, via the `geelark-cloud-adb` skill) only run with `gl bulk-run --cloud`, and they bill per minute. Ask the user before using `--cloud`, state which phones, start with `--max-tasks 1`, and afterwards confirm the report shows each phone stopped (`cloud.stopped`, no `stop_failures`). If a run was killed, run `gl bulk-cloud-stop`.
+- **Daily unattended routine**: the sheet's Phones / Library / Routine / Settings tabs (all dropdowns) define a plan that is queued every day at `run_time` and run by `gl bulk-run --only-cloud` on a VPS or GitHub Actions, then reported on the Overview tab and by email. Setup and safety: [references/unattended.md](references/unattended.md). Never edit the Routine to add posting, messaging, purchases or logins without the user's explicit approval, and never turn off `paused`/limits to "make it run". If asked to stop everything, tick `paused` in Settings first.
 - Report back from the run summary (`success` / `failed` / `other`) and the `logs/bulk-<run_id>.jsonl` path; do not claim success for tasks the report marks failed.
 
 ## Environment variables

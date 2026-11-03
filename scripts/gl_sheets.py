@@ -32,6 +32,10 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def truthy(value):
+    return str(value).strip().lower() in ("true", "yes", "y", "1", "on", "checked")
+
+
 def validate_url(url):
     u = urllib.parse.urlparse(str(url or ""))
     if u.scheme != "https" or u.hostname not in ALLOWED_HOSTS:
@@ -93,6 +97,18 @@ class SheetsClient:
         if not res.get("ok"):
             raise SheetsError(f"devices failed: {res.get('error')} {res.get('detail', '')}".strip())
         return [str(d) for d in res.get("devices", [])]
+
+    def pending_summary(self):
+        """{"devices": [named devices with waiting tasks], "blank": number of waiting tasks with no device}."""
+        res = self.call("devices")
+        if not res.get("ok"):
+            raise SheetsError(f"devices failed: {res.get('error')} {res.get('detail', '')}".strip())
+        return {"devices": [str(d) for d in res.get("devices", [])], "blank": int(res.get("blank") or 0)}
+
+    def settings(self):
+        """Run settings the owner edits in the sheet's Settings tab ({} if the tab/endpoint is unavailable)."""
+        res = self.call("settings")
+        return res.get("settings", {}) if res.get("ok") and isinstance(res.get("settings"), dict) else {}
 
     def claim(self, worker, limit=1, exact=False):
         res = self.call("claim", worker=worker, limit=limit, exact=bool(exact))

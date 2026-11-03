@@ -55,8 +55,8 @@ Each step may carry `"window": "<profile>"`.
 ```
 
 ## Bulk automation (ADB, parallel)
-`bulk-run [--cloud] [--max-cloud-phones N] [--cloud-up-timeout S] [--tasks FILE.json|.csv] [--devices a,b] [--retries N] [--max-workers N] [--max-tasks N] [--task-timeout S] [--task-delay S] [--dry-run] [--no-sheet] [--fail-on-error]`, `bulk-check`, `bulk-flush`, `bulk-cloud-stop` (stops cloud phones an interrupted run left running).
-Full guide, actions and sheet format: [bulk_automation.md](bulk_automation.md). These commands never take the desktop lock and are not exposed through the HTTP bridge.
+`bulk-run [--only-cloud] [--probe] [--max-runtime S] [--on-failure continue|stop] [--cloud] [--max-cloud-phones N] [--cloud-up-timeout S] [--tasks FILE.json|.csv] [--devices a,b] [--retries N] [--max-workers N] [--max-tasks N] [--task-timeout S] [--task-delay S] [--dry-run] [--no-sheet] [--fail-on-error]`, `bulk-check`, `bulk-flush`, `bulk-cloud-stop` (stops cloud phones an interrupted run left running).
+Retries, timeouts, cloud-phone cap, runtime cap and failure policy default to the sheet's **Settings** tab; a flag overrides it. `--only-cloud` is the unattended mode (cloud tasks only, quiet exit when idle, `--probe` = just check for work). Exit 0 for done / idle / paused / busy, 1 could not run, 4 failures with `--fail-on-error`. Full guide, actions and sheet format: [bulk_automation.md](bulk_automation.md); daily unattended setup: [unattended.md](unattended.md). These commands never take the desktop lock and are not exposed through the HTTP bridge.
 
 ## Cloud OpenAPI (optional)
 Needs `GEELARK_API_TOKEN` (or `--token`). Requests are retried on 429/5xx/network errors; non-zero API codes are returned as `status: error`.

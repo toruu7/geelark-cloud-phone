@@ -373,6 +373,8 @@ def _ui_text_action(ctx, p, click, default_timeout):
                 return fail(f"tap failed: {res['stderr'][:200]}")
             return ok(f"clicked '{p['text']}'", {"coords": [cx, cy]})
         if time.monotonic() >= end:
+            if p.get("optional") and not absent:
+                return ok(f"'{p['text']}' not shown (optional, skipped)")
             what = "still on screen" if absent else "not found on screen"
             return fail(f"'{p['text']}' {what}", {"nodes_seen": len(nodes)})
         ctx.wait(1.5)
@@ -468,6 +470,61 @@ def load_tasks_file(path):
 
 
 # ---------------------------------------------------------------------------
+# Run settings: explicit CLI flag > sheet Settings tab > built-in default
+# ---------------------------------------------------------------------------
+DEFAULT_SETTINGS = {"retries": 1, "max_workers": 8, "max_cloud_phones": 2, "task_timeout": 120.0,
+                    "task_delay": 0.0, "max_runtime": None, "on_failure": "continue"}
+
+
+def _as_int(v):
+    return int(float(v))
+
+
+def _minutes_to_s(v):
+    return float(v) * 60
+
+
+# run-setting -> (sheet key, parser, min, max)
+_SHEET_SETTINGS = {
+    "retries": ("retries", _as_int, 0, 5),
+    "max_cloud_phones": ("max_cloud_phones", _as_int, 1, 10),
+    "task_timeout": ("task_timeout_s", float, 10, 1800),
+    "task_delay": ("task_delay_s", float, 0, 600),
+    "max_runtime": ("max_runtime_min", _minutes_to_s, 60, 24 * 3600),
+}
+
+
+def resolve_settings(cli, sheet):
+    """Merge settings. Returns (settings, ignored) where `ignored` lists sheet values that were invalid or out of range."""
+    out, ignored = dict(DEFAULT_SETTINGS), []
+    for key, default in DEFAULT_SETTINGS.items():
+        if cli.get(key) is not None:
+            out[key] = cli[key]
+            continue
+        if key == "on_failure":
+            raw = str(sheet.get("on_failure", "")).strip().lower()
+            if raw in ("continue", "stop"):
+                out[key] = raw
+            elif raw:
+                ignored.append(f"on_failure={raw!r}")
+            continue
+        spec = _SHEET_SETTINGS.get(key)
+        raw = sheet.get(spec[0]) if spec else None
+        if raw in (None, ""):
+            continue
+        try:
+            value = spec[1](raw)
+        except (TypeError, ValueError):
+            ignored.append(f"{spec[0]}={raw!r}")
+            continue
+        if not (spec[2] <= value <= spec[3]):
+            ignored.append(f"{spec[0]}={raw!r} (allowed {spec[2]}-{spec[3]})")
+            continue
+        out[key] = value
+    return out, ignored
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 def execute_task(device, task, run_id, retries, task_timeout, shots_dir, reporter):
@@ -507,11 +564,16 @@ def execute_task(device, task, run_id, retries, task_timeout, shots_dir, reporte
 
 def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, max_tasks=None,
              task_timeout=120, task_delay=0.0, dry_run=False, log_dir=None, run_id=None,
-             cloud=False, max_cloud_phones=2, cloud_up_timeout=180):
+             cloud=False, max_cloud_phones=2, cloud_up_timeout=180,
+             only_cloud=False, max_runtime=None, on_failure="continue", probe=False):
     """Run tasks in parallel, one worker per phone. `tasks` = local list; otherwise tasks are claimed from `client`'s sheet.
 
     Local ADB phones are addressed by serial. GeeLark cloud phones are addressed as `cloud:<phone_id>`; they are only
-    started when `cloud=True` (they bill per minute), only take tasks addressed to them, and are always stopped."""
+    started when `cloud=True` (they bill per minute), only take tasks addressed to them, and are always stopped.
+
+    Unattended use: `only_cloud=True` ignores local ADB phones and tasks without a `cloud:` device. A sheet run with
+    nothing to do returns {"status": "idle"} without writing anything, so polling it every few minutes is free.
+    `max_runtime` (seconds) stops *new* tasks from starting; `on_failure="stop"` skips a phone's remaining tasks after one fails."""
     run_id = run_id or f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
     started = gl_sheets.now_iso()
     local_mode = tasks is not None
@@ -542,13 +604,28 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
         flushed = gl_sheets.flush_spool(client, log_dir)
         if flushed["sent"]:
             reporter.event("info", f"replayed {flushed['sent']} spooled report(s) from an earlier run")
+    if only_cloud:
+        cloud = True
+    pending = {"devices": [], "blank": 0}
+    if not local_mode:
+        try:
+            pending = client.pending_summary()
+        except gl_sheets.SheetsError as e:
+            return {"status": "error", "message": f"could not read the task queue: {e}", "run_id": run_id}
+        cloud_pending = [d for d in pending["devices"] if gl_cloudadb.CLOUD_DEVICE_RE.match(d)]
+        relevant = cloud_pending if only_cloud else pending["devices"] + (["*"] if pending["blank"] else [])
+        if not relevant:
+            return {"status": "idle", "run_id": run_id, "message": "no waiting tasks for this runner",
+                    "waiting_without_cloud_device": pending["blank"] if only_cloud else 0}
+        if probe:  # cheap "is there anything to do?" check for schedulers: needs only the sheet, starts nothing
+            return {"status": "work", "run_id": run_id, "waiting_devices": relevant}
     leftovers = gl_cloudadb.leftover_phones(reporter.log_dir)
     if leftovers:
         reporter.event("warning", f"cloud phone(s) from an interrupted run may still be billing: {', '.join(leftovers)}. "
                                   "Run `bulk-cloud-stop` to stop them.")
 
     # Workers: (claim name, adb serial). Cloud phones get their serial only after they have been started.
-    online = devices or gl_adb.list_devices(use_cache=False)
+    online = [] if only_cloud else (devices or gl_adb.list_devices(use_cache=False))
     local_workers = [(d, d) for d in online if gl_adb._SERIAL_RE.match(d) and not gl_cloudadb.is_cloud_device(d)][:max(1, max_workers)]
 
     wanted_cloud = set()
@@ -556,7 +633,7 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
         if local_mode:
             wanted_cloud = {t["device"] for t in queue}
         else:
-            wanted_cloud = set(client.pending_devices())
+            wanted_cloud = set(pending["devices"])
     except gl_sheets.SheetsError as e:
         reporter.event("error", f"could not read pending devices: {e}")
     wanted_cloud = sorted(d for d in wanted_cloud if gl_cloudadb.CLOUD_DEVICE_RE.match(d))
@@ -582,6 +659,8 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
                         "error", 0, 0, f"invalid task: {err}")
 
     lock = threading.Lock()
+    deadline = (time.monotonic() + max_runtime) if max_runtime else None
+    limit_logged = {"done": False}
     budget = {"left": max_tasks if max_tasks else float("inf"), "total": len(invalid)}
     stop = threading.Event()
     cloud_state = {"started": set(), "stopped": set(), "billed_s": 0.0, "stop_failures": []}
@@ -624,7 +703,16 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
     def work(name, serial, exact):
         """Take tasks for phone `name` one at a time and run them over `serial` until none are left."""
         failures = 0
+        phone_failed = False
         while not stop.is_set():
+            if deadline and time.monotonic() > deadline:
+                with lock:
+                    first = not limit_logged["done"]
+                    limit_logged["done"] = True
+                if first:
+                    reporter.event("warning", f"max runtime ({max_runtime / 60:.0f} min) reached; no new tasks will start, "
+                                              "remaining tasks stay pending")
+                return
             if not reserve():
                 return
             try:
@@ -645,7 +733,13 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
                 continue
             with lock:
                 budget["total"] += 1
-            execute_task(serial, dict(task, device=name), run_id, retries, task_timeout, shots_dir, reporter)
+            if phone_failed and on_failure == "stop":
+                reporter.report(dict(task, device=name), "skipped", 0, 0,
+                                "skipped: an earlier task on this phone failed (on_failure = stop)")
+                continue
+            status = execute_task(serial, dict(task, device=name), run_id, retries, task_timeout, shots_dir, reporter)
+            if status in ("failed", "timeout", "offline"):
+                phone_failed = True
             if task_delay:
                 time.sleep(task_delay)
 

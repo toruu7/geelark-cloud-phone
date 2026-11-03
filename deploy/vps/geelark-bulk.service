@@ -1,0 +1,28 @@
+[Unit]
+Description=GeeLark bulk runner (one pass over the sheet's task queue)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=geelark
+# GEELARK_API_TOKEN, GEELARK_SHEETS_URL, GEELARK_SHEETS_SECRET (see geelark.env.example); root-owned, mode 600
+EnvironmentFile=/etc/geelark.env
+Environment=HOME=/var/lib/geelark
+Environment=GEELARK_CLOUD_ADB=/opt/geelark/geelark-cloud-adb/scripts/geelark_adb.py
+WorkingDirectory=/opt/geelark/geelark-cloud-phone
+ExecStart=/usr/bin/python3 scripts/geelark.py bulk-run --only-cloud --log-dir /var/lib/geelark/logs
+
+# Billing safety. SIGTERM (systemctl stop, shutdown, RuntimeMaxSec) is turned into a clean shutdown by the runner,
+# which stops every cloud phone it started; the grace period below gives it time to do that.
+KillMode=mixed
+TimeoutStopSec=300
+RuntimeMaxSec=3h
+# Runs even after a crash or SIGKILL: stop any cloud phone the runner left registered as running.
+ExecStopPost=/usr/bin/python3 scripts/geelark.py bulk-cloud-stop --log-dir /var/lib/geelark/logs
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/geelark

@@ -4,6 +4,7 @@ import os
 import time
 import json
 import argparse
+import signal
 import subprocess
 from _version import __version__ as VERSION
 from gl_lock import DeviceLock, LockTimeout
@@ -33,6 +34,72 @@ LOCK_FREE_COMMANDS = {
     # ADB-only: never touches the mouse, windows or shared desktop cache files
     "bulk-run", "bulk-check", "bulk-flush", "bulk-cloud-stop",
 }
+
+def _install_term_handler():
+    """Turn SIGTERM/SIGHUP (scheduler cancel, systemd stop, `kill`) into KeyboardInterrupt so the run's
+    billing safety net (stop every cloud phone it started) executes instead of the process just dying."""
+    def handler(signum, frame):
+        raise KeyboardInterrupt()
+    for name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):  # not the main thread / unsupported here
+                pass
+
+
+def _bulk_run(args):
+    """Returns the process exit code. 0 = finished or idle/paused/busy, 1 = could not run, 4 = tasks failed (--fail-on-error)."""
+    client = None if args.no_sheet else gl_sheets.SheetsClient.from_env()
+    cli_values = {"retries": args.retries, "max_workers": args.max_workers, "max_cloud_phones": args.max_cloud_phones,
+                  "task_timeout": args.task_timeout, "task_delay": args.task_delay, "max_runtime": args.max_runtime,
+                  "on_failure": args.on_failure}
+    sheet_settings = {}
+    if client and not args.tasks:
+        sheet_settings = client.settings()
+        if gl_sheets.truthy(sheet_settings.get("paused")):
+            print(json.dumps({"status": "paused", "message": "paused in the Settings tab; nothing was started"}, indent=2))
+            return 0
+    cfg, ignored = gl_bulk.resolve_settings(cli_values, sheet_settings)
+    if args.only_cloud and not client and not args.tasks:
+        print(json.dumps({"status": "error", "message": "--only-cloud needs the sheet (GEELARK_SHEETS_URL / GEELARK_SHEETS_SECRET) or --tasks"}, indent=2))
+        return 1
+
+    if args.probe:
+        res = gl_bulk.run_bulk(tasks=None, client=client, only_cloud=args.only_cloud, probe=True, log_dir=args.log_dir) if client else \
+            {"status": "error", "message": "--probe needs the sheet (GEELARK_SHEETS_URL / GEELARK_SHEETS_SECRET)"}
+        print(json.dumps(res, indent=2))
+        return 1 if res.get("status") == "error" else 0
+
+    # One bulk run per machine at a time: two runs would start/stop the same cloud phones under each other.
+    run_lock = DeviceLock(path=os.path.join(os.path.dirname(DeviceLock().path), "geelark-bulk-run.lock"), timeout=0)
+    try:
+        run_lock.acquire()
+    except LockTimeout:
+        print(json.dumps({"status": "busy", "message": "another bulk-run is already running on this machine"}, indent=2))
+        return 0
+    try:
+        _install_term_handler()
+        tasks = gl_bulk.load_tasks_file(args.tasks) if args.tasks else None
+        res = gl_bulk.run_bulk(
+            tasks=tasks, client=client,
+            devices=[d.strip() for d in args.devices.split(",") if d.strip()] if args.devices else None,
+            retries=max(0, cfg["retries"]), max_workers=cfg["max_workers"], max_tasks=args.max_tasks,
+            task_timeout=cfg["task_timeout"], task_delay=cfg["task_delay"], dry_run=args.dry_run, log_dir=args.log_dir,
+            cloud=args.cloud, max_cloud_phones=cfg["max_cloud_phones"], cloud_up_timeout=args.cloud_up_timeout,
+            only_cloud=args.only_cloud, max_runtime=cfg["max_runtime"], on_failure=cfg["on_failure"], probe=args.probe)
+    finally:
+        run_lock.release()
+    if ignored:
+        res["ignored_sheet_settings"] = ignored
+    print(json.dumps(res, indent=2))
+    if res.get("status") == "error":
+        return 1
+    if args.fail_on_error and res.get("failed"):
+        return 4
+    return 0
+
 
 def main():
     parser = argparse.ArgumentParser(description=f"GeeLark Cloud Phone Controller v{VERSION}")
@@ -235,16 +302,20 @@ def main():
     p_bulk = subparsers.add_parser("bulk-run", help="Run queued tasks on many phones in parallel over ADB and report to a Google Sheet")
     p_bulk.add_argument("--tasks", help="JSON/CSV task file. Omit to claim tasks from the Google Sheet queue")
     p_bulk.add_argument("--devices", help="Comma-separated ADB serials (default: all connected)")
-    p_bulk.add_argument("--retries", type=int, default=1, help="Retries per failed task (default 1)")
-    p_bulk.add_argument("--max-workers", type=int, default=8, help="Max phones worked in parallel")
+    p_bulk.add_argument("--retries", type=int, default=None, help="Retries per failed task (default: Settings tab, else 1)")
+    p_bulk.add_argument("--max-workers", type=int, default=None, help="Max local phones worked in parallel (default 8)")
     p_bulk.add_argument("--max-tasks", type=int, help="Stop after this many tasks")
-    p_bulk.add_argument("--task-timeout", type=float, default=120.0, help="Seconds allowed per task attempt")
-    p_bulk.add_argument("--task-delay", type=float, default=0.0, help="Pause between tasks on the same phone")
+    p_bulk.add_argument("--task-timeout", type=float, default=None, help="Seconds allowed per task attempt (default: Settings tab, else 120)")
+    p_bulk.add_argument("--task-delay", type=float, default=None, help="Pause between tasks on the same phone (default: Settings tab, else 0)")
+    p_bulk.add_argument("--max-runtime", type=float, default=None, help="Seconds after which no NEW task starts (default: Settings tab, else unlimited)")
+    p_bulk.add_argument("--on-failure", choices=["continue", "stop"], default=None, help="After a task fails: keep going, or skip that phone's remaining tasks (default: Settings tab, else continue)")
+    p_bulk.add_argument("--probe", action="store_true", help="Only check the sheet: prints status work|idle|paused and starts nothing (lets a scheduler skip installing ADB when there is no work)")
+    p_bulk.add_argument("--only-cloud", action="store_true", help="Unattended mode: only cloud: tasks, no local ADB phones, implies --cloud; exits quietly when idle")
     p_bulk.add_argument("--dry-run", action="store_true", help="Validate a --tasks file and show the plan; touch nothing")
     p_bulk.add_argument("--no-sheet", action="store_true", help="Log locally only, even if sheet env vars are set")
     p_bulk.add_argument("--log-dir", help="Directory for run logs, screenshots and the report spool (default: ./logs)")
     p_bulk.add_argument("--cloud", action="store_true", help="Start GeeLark cloud phones named as cloud:<id> in tasks (they bill per minute; always stopped afterwards)")
-    p_bulk.add_argument("--max-cloud-phones", type=int, default=2, help="Cap on cloud phones started in one run (default 2)")
+    p_bulk.add_argument("--max-cloud-phones", type=int, default=None, help="Cap on cloud phones started in one run (default: Settings tab, else 2)")
     p_bulk.add_argument("--cloud-up-timeout", type=int, default=180, help="Seconds to wait for a cloud phone to boot and ADB to connect")
     p_bulk.add_argument("--fail-on-error", action="store_true", help="Exit with code 4 if any task failed")
 
@@ -471,19 +542,7 @@ def main():
             print(json.dumps(res, indent=2))
 
         elif args.command == "bulk-run":
-            client = None if args.no_sheet else gl_sheets.SheetsClient.from_env()
-            tasks = gl_bulk.load_tasks_file(args.tasks) if args.tasks else None
-            res = gl_bulk.run_bulk(
-                tasks=tasks, client=client,
-                devices=[d.strip() for d in args.devices.split(",") if d.strip()] if args.devices else None,
-                retries=max(0, args.retries), max_workers=args.max_workers, max_tasks=args.max_tasks,
-                task_timeout=args.task_timeout, task_delay=args.task_delay, dry_run=args.dry_run, log_dir=args.log_dir,
-                cloud=args.cloud, max_cloud_phones=args.max_cloud_phones, cloud_up_timeout=args.cloud_up_timeout)
-            print(json.dumps(res, indent=2))
-            if res.get("status") == "error":
-                sys.exit(1)
-            if args.fail_on_error and res.get("failed"):
-                sys.exit(4)
+            sys.exit(_bulk_run(args))
 
         elif args.command == "bulk-check":
             client = gl_sheets.SheetsClient.from_env()

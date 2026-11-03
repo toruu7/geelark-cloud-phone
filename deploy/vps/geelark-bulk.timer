@@ -1,0 +1,12 @@
+[Unit]
+Description=Check the GeeLark sheet queue every 5 minutes
+
+[Timer]
+# An empty queue makes the runner exit immediately without writing anything, so polling is free.
+OnCalendar=*:0/5
+RandomizedDelaySec=20
+Persistent=false
+Unit=geelark-bulk.service
+
+[Install]
+WantedBy=timers.target

@@ -5,7 +5,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Android-brightgreen?style=flat-square&logo=windows)](SKILL.md)
 [![Compatibility](https://img.shields.io/badge/Compatible-Claude_%7C_Antigravity_%7C_Grok_Bot_%7C_Cursor_%7C_OpenClaw_%7C_Codex-orange?style=flat-square)](INSTALL.md)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-193%20Passing-success?style=flat-square)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-243%20Passing-success?style=flat-square)](tests/)
 
 > **`geelark`** · **`cloud-phone`** · **`android-automation`** · **`mobile-agent`** · **`claude-code`** · **`antigravity`** · **`grok-bot`** · **`cursor`** · **`openclaw`** · **`adb`** · **`ocr`** · **`n8n`** · **`set-of-mark`**
 
@@ -89,6 +89,12 @@ python scripts/geelark.py dismiss-popup
 ## 📊 Bulk Automation + Google Sheets
 
 `python scripts/geelark.py bulk-run` runs a task queue on all connected phones **in parallel over ADB** (one worker per phone, no mouse takeover). The queue and the reports live in a Google Sheet through a small Apps Script web app (`sheets/apps_script.gs`): each task ends as `success`, `failed`, `error`, `timeout`, `offline` or `skipped`, with retries, durations, screenshots and a per-run summary, plus a local JSONL log and an offline spool so nothing is lost. There is no raw-shell action, params are validated, and everything sent to the device shell is quoted. Put `cloud:<phone_id>` in the device column and run with `--cloud` to drive GeeLark cloud phones from the same sheet (started via the `geelark-cloud-adb` skill, always stopped afterwards). Start with `--dry-run` and `--max-tasks 1`. See [references/bulk_automation.md](references/bulk_automation.md).
+
+---
+
+## 🗓️ Daily Unattended Routine (PC off)
+
+Build a plan once in the sheet with dropdowns only (**Phones**, **Library** of named tasks, **Routine**, **Settings**): pick a phone, pick a task, optionally a link and a duration. Every day at your chosen time the plan is queued and a runner on a small VPS or GitHub Actions (`deploy/`) works through it phone by phone, each phone taking its next task when the previous one finishes. Results land in Reports, a live Overview and an email. Cloud phones are stopped after use (billing safety on every exit path), a `paused` tick stops everything instantly, and an idle check makes frequent polling free. See [references/unattended.md](references/unattended.md).
 
 ---
 

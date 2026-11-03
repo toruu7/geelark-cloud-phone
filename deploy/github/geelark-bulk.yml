@@ -1,0 +1,79 @@
+# GeeLark unattended runner on GitHub Actions.
+#
+# Copy this file to .github/workflows/geelark-bulk.yml in the repository that holds the runner (a PRIVATE copy/fork
+# of geelark-cloud-phone is recommended, because run logs can mention your phone ids), then add three repository
+# secrets (Settings > Secrets and variables > Actions):
+#   GEELARK_API_TOKEN, GEELARK_SHEETS_URL, GEELARK_SHEETS_SECRET
+# If the geelark-cloud-adb repository is private, also add CLOUD_ADB_REPO_TOKEN (a read-only token for that repo).
+#
+# Cost control: a cheap first job step asks the sheet whether anything is waiting. Only when it is does the job
+# install ADB and start phones. Keep the cron window narrow (GitHub bills every started job per minute, rounded up).
+# Cron is in UTC. Example: run_time 09:00 UTC in the sheet  ->  poll every 10 minutes from 09:00 to 11:59 UTC.
+name: geelark-bulk
+
+on:
+  schedule:
+    - cron: "*/10 9-11 * * *"      # EDIT to a window that starts at your run_time (UTC). Minimum interval is 5 minutes.
+  workflow_dispatch: {}              # manual "Run workflow" button
+
+# Never two runners at once: they would start and stop the same cloud phones under each other.
+concurrency:
+  group: geelark-bulk
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120             # hard cap; a cancelled/timed-out job still runs the cleanup step below
+    env:
+      GEELARK_API_TOKEN: ${{ secrets.GEELARK_API_TOKEN }}
+      GEELARK_SHEETS_URL: ${{ secrets.GEELARK_SHEETS_URL }}
+      GEELARK_SHEETS_SECRET: ${{ secrets.GEELARK_SHEETS_SECRET }}
+      GEELARK_CLOUD_ADB: ${{ github.workspace }}/geelark-cloud-adb/scripts/geelark_adb.py
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Is there anything to do?
+        id: probe
+        run: |
+          out=$(python scripts/geelark.py bulk-run --only-cloud --probe)
+          echo "$out"
+          status=$(printf '%s' "$out" | python -c 'import sys, json; print(json.load(sys.stdin)["status"])')
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the cloud-adb skill
+        if: steps.probe.outputs.status == 'work'
+        uses: actions/checkout@v4
+        with:
+          repository: toruu7/geelark-cloud-adb
+          path: geelark-cloud-adb
+          token: ${{ secrets.CLOUD_ADB_REPO_TOKEN || github.token }}
+
+      - name: Install adb
+        if: steps.probe.outputs.status == 'work'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq adb
+
+      - name: Run the queue
+        if: steps.probe.outputs.status == 'work'
+        run: python scripts/geelark.py bulk-run --only-cloud --fail-on-error
+
+      # Billing safety net: runs even if the job failed, timed out or was cancelled.
+      - name: Stop any cloud phone still running
+        if: always() && steps.probe.outputs.status == 'work'
+        run: python scripts/geelark.py bulk-cloud-stop
+
+      - name: Keep the run log
+        if: always() && steps.probe.outputs.status == 'work'
+        uses: actions/upload-artifact@v4
+        with:
+          name: geelark-run-logs
+          path: logs/
+          retention-days: 7
+          if-no-files-found: ignore
