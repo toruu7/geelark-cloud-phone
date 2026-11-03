@@ -64,6 +64,19 @@ Copy [deploy/github/geelark-bulk.yml](../deploy/github/geelark-bulk.yml) to `.gi
 * `concurrency` prevents overlapping runs; a final `always()` step stops any phone left running, even after a cancel or timeout.
 * Limits to know: scheduled runs can start late or be skipped under GitHub load, the minimum interval is 5 minutes, scheduled workflows are paused after 60 days without repository activity, and private repositories have a monthly minutes allowance. The narrow cron window keeps usage low.
 
+### Option C: a Claude cloud routine (no server, no GitHub Actions)
+Claude's scheduled tasks can run the daily pass in Anthropic's cloud, so the PC can be off. A *cloud* task (not "Only on this computer") clones this repository, and Claude Code loads the skills in its `.claude/skills/` folder:
+* `geelark-daily-operator`: the playbook the unattended agent follows (probe, run once, stop every phone, report, hard safety rules).
+* `geelark-cloud-adb`: your phone-control skill (a vendored copy, so one clone is self-contained). The runner also uses its script to start and stop the cloud phone.
+
+Setup:
+1. **Connect GitHub** to your Claude account (https://claude.ai/connect-github) so the routine can clone the repository.
+2. **Add three environment variables** to the cloud environment's settings: `GEELARK_API_TOKEN`, `GEELARK_SHEETS_URL`, `GEELARK_SHEETS_SECRET`. Never put them in the prompt. Check the environment's network access allows outbound connections on custom ports (ADB to the phone's `ip:port`); a throwaway connectivity-check routine tells you.
+3. **Create the routine**: repository `toruu7/geelark-cloud-phone`, prompt = [`deploy/claude-routine/prompt.txt`](../deploy/claude-routine/prompt.txt), tools Bash and Read (plus Skill if offered), no connectors, a daily schedule shortly after `run_time`. Cron is in UTC with a one-hour minimum interval: `run_time` 09:00 in Asia/Dhaka (UTC+6) means the sheet queues at 03:00 UTC, so schedule `15 3 * * *` (09:15 Dhaka).
+4. Keep the vendored skill current with `python scripts/sync_cloud_adb.py` (pulls the pinned latest commit of the upstream repo; review and commit).
+
+How it differs from the other options: the agent does not decide what the phones do (the sheet's plan does, through the same runner); it supervises. Each run is one Claude session, so it uses some of your Claude usage, and a scheduled run can start a few minutes late. A run that dies mid-way can leave a phone running; the next run cannot see it because each cloud sandbox is discarded, so rely on `max_runtime_min`, the task timeouts and the runner's own stop-on-exit handling, and check the Overview after the first runs.
+
 ## 3. Safety and cost
 
 | Risk | Protection |

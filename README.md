@@ -98,6 +98,12 @@ Build a plan once in the sheet with dropdowns only (**Phones**, **Library** of n
 
 ---
 
+### ☁️ Run it from a Claude cloud routine
+
+`.claude/skills/` holds the skills an unattended cloud agent loads from a single clone: `geelark-daily-operator` (the run-once, stop-everything, report playbook) and a vendored copy of [geelark-cloud-adb](https://github.com/toruu7/geelark-cloud-adb) (`python scripts/sync_cloud_adb.py` refreshes it). The routine prompt is in `deploy/claude-routine/prompt.txt`; setup is in [references/unattended.md](references/unattended.md).
+
+---
+
 ## 🔒 Security & Robustness
 
 - **HTTP bridge is locked down**: binds to `127.0.0.1`, requires `Authorization: Bearer <token>` on every POST (auto-generated at startup, or set `GEELARK_BRIDGE_TOKEN`), allowlists commands (no raw `adb`), and sends no CORS headers unless you pass `--cors-origin`. Use `--host 0.0.0.0` only for Docker n8n on a trusted network.

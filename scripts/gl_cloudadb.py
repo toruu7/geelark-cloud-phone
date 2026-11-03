@@ -43,6 +43,8 @@ def find_script():
     home = os.path.expanduser("~")
     candidates = [
         os.environ.get("GEELARK_CLOUD_ADB", "").strip(),
+        # vendored copy: a single clone of this repo (e.g. in a cloud agent) is self-contained
+        os.path.join(skill_dir, ".claude", "skills", "geelark-cloud-adb", "scripts", "geelark_adb.py"),
         os.path.join(os.path.dirname(skill_dir), "geelark-cloud-adb", "scripts", "geelark_adb.py"),
         os.path.join(home, ".claude", "skills", "geelark-cloud-adb", "scripts", "geelark_adb.py"),
         os.path.join(home, ".gemini", "config", "skills", "geelark-cloud-adb", "scripts", "geelark_adb.py"),

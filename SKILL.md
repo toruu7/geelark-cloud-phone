@@ -3,7 +3,7 @@ name: geelark-cloud-phone
 description: Control and inspect GeeLark cloud phones on a Windows host - capture the screen, tap, swipe, type, press Back/Home, open apps and links, and click UI text via ADB or local OCR. Use when the user wants to operate, test, or automate a GeeLark phone profile.
 metadata:
   author: toruu7
-  version: "4.6.0"
+  version: "4.7.0"
   license: MIT
   platform: windows
   repository: https://github.com/toruu7/geelark-cloud-phone
