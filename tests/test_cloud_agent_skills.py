@@ -162,8 +162,16 @@ class TestRoutinePrompt(unittest.TestCase):
         text = read("deploy", "claude-routine", "prompt.txt")
         self.assertIn(".claude/skills/geelark-daily-operator/SKILL.md", text)
         self.assertIn("follow it exactly", text)
+        self.assertIn("/opt/geelark", text)
         self.assertNotRegex(text, r"(?i)(token|secret)\s*[:=]\s*\S{12,}")
         self.assertLess(len(text), 1200)
+
+
+    def test_setup_script_pins_a_commit(self):
+        text = read("deploy", "claude-routine", "setup.sh")
+        self.assertRegex(text, r"(?m)^REF=[0-9a-f]{40}$")
+        self.assertIn("DEST=/opt/geelark", text)
+        self.assertNotIn(chr(13), text)
 
 
 if __name__ == "__main__":
