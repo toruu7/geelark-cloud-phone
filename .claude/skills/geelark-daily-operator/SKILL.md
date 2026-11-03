@@ -18,7 +18,7 @@ The plan (which phones, which tasks, in what order, limits, pause switch) lives 
 
 ## Steps (from the repository root)
 
-1. **Preconditions.** Check `python3 --version`, `adb version` (if adb is missing run `sudo apt-get install -y adb` or `apt-get install -y adb`), and that the three variables above are SET. If something is missing, stop and report exactly what (nothing has started yet).
+1. **Preconditions.** Check `python3 --version`, `adb version` (if adb is missing run `apt-get update && apt-get install -y adb`; the update matters, because a fresh sandbox has empty package lists and a plain install fails with "Unable to locate package"), and that the three variables above are SET. If something is missing, stop and report exactly what (nothing has started yet).
 
 2. **Is there work?**
    `python3 scripts/geelark.py bulk-run --only-cloud --probe`
