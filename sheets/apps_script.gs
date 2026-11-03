@@ -195,7 +195,7 @@ function report_(body) {
     duration_s: Number(body.duration_s) || 0, message: clip_(body.message), output: clip_(body.output),
     phone: row ? row.phone || '' : '', task: row ? row.task || '' : ''
   });
-  if (row && row.batch) maybeSendReport_(String(row.batch), 'All tasks finished.');
+  if (row && row.batch) maybeSendReport_(batchKey_(row.batch), 'All tasks finished.');
   safely_(refreshDashboard_);
   return { ok: true };
 }
@@ -421,6 +421,12 @@ function fillTemplate_(template, value, duration) {
   return out;
 }
 
+// A batch id like "2026-11-03" looks like a date, so Sheets may store it as one. Always compare it as text.
+function batchKey_(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, tz_(settingsMap_()), 'yyyy-MM-dd');
+  return v === undefined || v === null ? '' : String(v);
+}
+
 function slug_(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'phone';
 }
@@ -431,7 +437,7 @@ function expireOld_(tasks, batch) {
   tasks.rows.forEach(function (r) {
     var status = String(r.status || '').trim().toLowerCase();
     if (!(status === 'pending' || status === 'running')) return;
-    var b = String(r.batch || '');
+    var b = batchKey_(r.batch);
     if (!b || b.slice(0, 10) >= day) return;                   // hand-added rows and same-day rows stay
     setCells_(tasks, r, { status: 'expired', result: 'not run before the next daily batch' });
   });
@@ -445,7 +451,7 @@ function trim_() {
   rewriteWithout_(TAB.TASKS, function (o) {
     var status = String(o.status || '').toLowerCase();
     return TERMINAL[status] && o.finished_at && new Date(o.finished_at) < cutoff ||
-           status === 'expired' && o.batch && new Date(String(o.batch).slice(0, 10)) < cutoff;
+           status === 'expired' && o.batch && new Date(batchKey_(o.batch).slice(0, 10)) < cutoff;
   });
   var repCut = new Date(NOW_().getTime() - REPORT_KEEP_DAYS * 86400000);
   rewriteWithout_(TAB.REPORTS, function (o) { return o.timestamp && new Date(o.timestamp) < repCut; });
@@ -468,7 +474,7 @@ function rewriteWithout_(name, shouldDrop) {
 // Daily report email
 // ---------------------------------------------------------------------------------------------------------------
 function batchStats_(batch) {
-  var rows = table_(TAB.TASKS).rows.filter(function (r) { return String(r.batch) === String(batch); });
+  var rows = table_(TAB.TASKS).rows.filter(function (r) { return batchKey_(r.batch) === String(batch); });
   var stats = { rows: rows, total: rows.length, open: 0, success: 0, failed: 0, skipped: 0, expired: 0, phones: {}, failures: [] };
   rows.forEach(function (r) {
     var s = String(r.status || '').trim().toLowerCase();
@@ -541,6 +547,7 @@ function refreshDashboard_() {
   var nowMin = minutesOf_(Utilities.formatDate(NOW_(), tz, 'HH:mm'));
   var next = (props.getProperty('LAST_SCHEDULED_DATE') !== today && runAt !== '?' && nowMin < minutesOf_(runAt) ? 'today' : 'tomorrow') + ' at ' + runAt;
   var state = ensureSheet_(TAB.STATE, []);
+  state.getRange(1, 2, 5, 1).setNumberFormat('@');   // keep '2026-11-03' and timestamps as text, not date numbers
   state.getRange(1, 1, 5, 2).setValues([
     ['updated', Utilities.formatDate(NOW_(), tz, 'yyyy-MM-dd HH:mm')],
     ['status', status],
@@ -642,6 +649,9 @@ function applyUi_() {
   ifMissing(range(routine, 5), strictList(DURATIONS.map(String)));
   ifMissing(range(phones, 1), rule().requireCheckbox().build());
   ifMissing(range(phones, 3), strictList(['cloud', 'local']));
+  var tasksSheet = sheet_(TAB.TASKS);
+  var batchCol = tasksSheet.getRange(1, 1, 1, Math.max(1, tasksSheet.getLastColumn())).getValues()[0].map(function (h) { return String(h).trim(); }).indexOf('batch');
+  if (batchCol >= 0) tasksSheet.getRange(2, batchCol + 1, MAX_ROWS * 4, 1).setNumberFormat('@');
   // GeeLark profile ids are 18-digit numbers; Sheets stores long numbers as floats and would silently change the last digits.
   phones.getRange(2, 4, MAX_ROWS, 1).setNumberFormat('@');
   if (!phones.getRange('E2').getFormula()) {

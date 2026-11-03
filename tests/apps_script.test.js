@@ -179,6 +179,25 @@ test('yesterday\'s unfinished tasks expire; hand-added and same-day rows are unt
   assert.equal(taskRows(env).filter((r) => r.batch === '2026-11-03' && r.status === 'pending').length, 1);   // manual run didn't expire the scheduled batch
 });
 
+test('a batch id stored as a Date (Sheets auto-converts "2026-11-03") still matches everywhere', () => {
+  const env = fresh({ now: '2026-11-04T09:10:00Z' });
+  env.setSetting('report_email', 'x@example.com');
+  env.addRoutine(true, 'Phone 4', 'Open YouTube');
+  const asDate = env.makeDate('2026-11-03T00:00:00Z');
+  const tasks = env.sheet('Tasks');
+  tasks.appendRow(['d-1', 'cloud:p4id', 'key', '{"name":"home"}', 'success', 1, '', '', '2026-11-03T05:00:00.000Z', 'ok', asDate, 'Phone 4', 'Press Home', '']);
+  tasks.appendRow(['d-2', 'cloud:p4id', 'key', '{"name":"home"}', 'pending', '', '', '', '', '', asDate, 'Phone 4', 'Press Home', '']);
+  assert.equal(env.ctx.batchStats_('2026-11-03').total, 2);                 // matched by value, not by Date string
+  env.ctx.enqueue_({ batch: '2026-11-04', scheduled: true });
+  const by = Object.fromEntries(taskRows(env).map((r) => [r.task_id, r.status]));
+  assert.deepEqual(by['d-2'], 'expired');                                   // yesterday's unfinished task expired
+  assert.deepEqual(by['d-1'], 'success');
+  env.post({ action: 'claim', worker: 'cloud:p4id', exact: true });
+  env.post({ action: 'claim', worker: 'cloud:p4id', exact: true });
+  env.post({ action: 'report', task_id: '2026-11-04-phone-4-01', status: 'success', attempts: 1 });
+  assert.equal(env.state.mail.length, 1);                                   // the day's report is still sent
+});
+
 test('trim removes old finished rows only and keeps the header', () => {
   const env = fresh();
   env.setSetting('keep_days', 7);
