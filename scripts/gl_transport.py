@@ -48,6 +48,7 @@ class ApiTransport:
     def __init__(self, phone_id):
         self.phone_id = str(phone_id)
         self.label = f"api-{self.phone_id}"
+        self.ui_tries = 3          # a failed dump can take ~8 s; callers that poll set this to 1
 
     # -- low level -----------------------------------------------------------------------------------------
     def _call(self, endpoint, payload, timeout=30):
@@ -85,7 +86,7 @@ class ApiTransport:
     def _ui_dump(self, cmd, timeout):
         """The phone returns the labelled <node ...> tags; wrap them into the XML the parser reads. uiautomator fails with
         "could not get idle state" while a video animates, so an empty answer is retried."""
-        for _ in range(3):
+        for _ in range(max(1, int(self.ui_tries))):
             res = self._shell(cmd, timeout)
             tags = [ln.strip() for ln in res["stdout"].splitlines() if ln.strip().startswith("<node ")]
             if res["returncode"] == 0 and tags:

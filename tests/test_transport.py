@@ -85,6 +85,14 @@ class TestApiTransport(unittest.TestCase):
         self.assertEqual(res["returncode"], 1)
         self.assertEqual(len([c for c in self.api.calls if c[0] == "/open/v1/shell/execute"]), 3)
 
+    def test_ui_dump_single_attempt_when_polling(self):
+        tr = gl_transport.ApiTransport("123")
+        tr.ui_tries = 1
+        with mock.patch("time.sleep"):
+            res = tr.run(["exec-out", "uiautomator", "dump", "/dev/tty"])
+        self.assertEqual(res["returncode"], 1)
+        self.assertEqual(len([c for c in self.api.calls if c[0] == "/open/v1/shell/execute"]), 1)
+
     def test_unsupported_command_is_an_error_not_a_call(self):
         res = gl_transport.ApiTransport("123").run(["push", "a", "b"])
         self.assertEqual(res["returncode"], 2)

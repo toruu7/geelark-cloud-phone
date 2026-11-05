@@ -371,22 +371,31 @@ def _r_description_link(ctx, p):
     #    was seen or ~15 s passed without one (an ad shows within a few seconds). Skip is tapped only on an exact "Skip" label.
     started = time.monotonic()
     end = started + ad_wait
-    seen_ad, clear = False, 0
-    while True:
-        nodes = ui_nodes(ctx)
-        if _ad_on_screen(nodes):
-            seen_ad, clear = True, 0
-            skip = next((n for n in nodes if _label(n).lower() in SKIP_LABELS), None)
-            if skip:
-                _tap_center(ctx, skip)
-        else:
-            clear += 1
-        if clear >= 3 and (seen_ad or time.monotonic() - started >= 15):
-            break
-        if time.monotonic() >= end:
-            shot()
-            return fail(f"an ad was still on screen after {int(ad_wait)}s; nothing was tapped", {"screenshots": shots})
-        ctx.wait(2)
+    seen_ad, clear, ad_last = False, 0, False
+    tries = getattr(ctx.transport, "ui_tries", None)
+    if tries is not None:
+        ctx.transport.ui_tries = 1       # polling: one attempt per read (a failed read on a busy page is slow)
+    try:
+        while True:
+            nodes = ui_nodes(ctx)
+            ad_last = _ad_on_screen(nodes)
+            if ad_last:
+                seen_ad, clear = True, 0
+                skip = next((n for n in nodes if _label(n).lower() in SKIP_LABELS), None)
+                if skip:
+                    _tap_center(ctx, skip)
+            else:
+                clear += 1
+            if clear >= 3 and (seen_ad or time.monotonic() - started >= 15):
+                break
+            if time.monotonic() >= end:
+                shot()
+                why = "an ad was still on screen" if ad_last else "could not confirm the ad had ended (the screen was not readable)"
+                return fail(f"{why} after {int(ad_wait)}s; nothing was tapped", {"screenshots": shots, "ad_seen": seen_ad})
+            ctx.wait(2)
+    finally:
+        if tries is not None:
+            ctx.transport.ui_tries = tries
 
     # 2) never tap outside the YouTube app
     fg = foreground_package(ctx) or ""
