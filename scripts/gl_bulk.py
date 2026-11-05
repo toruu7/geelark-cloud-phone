@@ -136,6 +136,7 @@ class Ctx:
         self.deadline = deadline
         self.shots_dir = shots_dir
         self._screen = None
+        self._shots = 0
 
     def check(self):
         if time.monotonic() > self.deadline:
@@ -373,7 +374,9 @@ def _r_screenshot(ctx, p):
     if res["returncode"] != 0 or not ext:
         return fail("screenshot failed", {"stderr": str(res["stderr"])[:200]})
     os.makedirs(ctx.shots_dir, exist_ok=True)
-    name = SAFE_NAME_RE.sub("_", f"{ctx.task_id}-{ctx.device}") + "." + ext
+    ctx._shots += 1
+    suffix = "" if ctx._shots == 1 else f"-{ctx._shots}"   # a flow can take several; do not overwrite the first
+    name = SAFE_NAME_RE.sub("_", f"{ctx.task_id}-{ctx.device}") + suffix + "." + ext
     path = os.path.join(ctx.shots_dir, name)
     with open(path, "wb") as f:
         f.write(data)

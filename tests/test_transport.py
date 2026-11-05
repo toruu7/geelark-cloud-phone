@@ -109,5 +109,16 @@ class TestApiTransport(unittest.TestCase):
         self.assertTrue(os.path.exists(res["output"]["path"]))
 
 
+    def test_second_screenshot_in_one_task_does_not_overwrite_the_first(self):
+        class T(gl_transport.ApiTransport):
+            def screenshot(self, timeout=90):
+                return {"returncode": 0, "stdout": PNG, "stderr": ""}
+        ctx = gl_bulk.Ctx(T("123"), "t1", "r1", __import__("time").monotonic() + 60, self.tmp)
+        first = gl_bulk._r_screenshot(ctx, {})["output"]["path"]
+        second = gl_bulk._r_screenshot(ctx, {})["output"]["path"]
+        self.assertNotEqual(first, second)
+        self.assertTrue(os.path.exists(first) and os.path.exists(second))
+
+
 if __name__ == "__main__":
     unittest.main()
