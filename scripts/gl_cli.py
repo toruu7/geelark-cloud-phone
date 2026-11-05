@@ -50,6 +50,37 @@ def _install_term_handler():
                 pass
 
 
+class keep_awake:
+    """Stop Windows from sleeping while cloud phones are running. A sleeping PC freezes the runner but the phones keep
+    running and billing (an 80-minute sleep once billed 82 phone-minutes for a 3-minute job). No-op elsewhere."""
+    ES_CONTINUOUS = 0x80000000
+    ES_SYSTEM_REQUIRED = 0x00000001
+
+    def __init__(self, active=True):
+        self.active = active and sys.platform == "win32"
+        self.on = False
+
+    def _set(self, flags):
+        import ctypes
+        return ctypes.windll.kernel32.SetThreadExecutionState(flags)
+
+    def __enter__(self):
+        if self.active:
+            try:
+                self.on = bool(self._set(self.ES_CONTINUOUS | self.ES_SYSTEM_REQUIRED))
+            except Exception:
+                self.on = False
+        return self
+
+    def __exit__(self, *exc):
+        if self.on:
+            try:
+                self._set(self.ES_CONTINUOUS)
+            except Exception:
+                pass
+        return False
+
+
 def _bulk_run(args):
     """Returns the process exit code. 0 = finished or idle/paused/busy, 1 = could not run, 4 = tasks failed (--fail-on-error)."""
     client = None if args.no_sheet else gl_sheets.SheetsClient.from_env()
@@ -83,7 +114,8 @@ def _bulk_run(args):
     try:
         _install_term_handler()
         tasks = gl_bulk.load_tasks_file(args.tasks) if args.tasks else None
-        res = gl_bulk.run_bulk(
+        with keep_awake(active=bool(args.cloud) and not args.dry_run):
+            res = gl_bulk.run_bulk(
             tasks=tasks, client=client,
             devices=[d.strip() for d in args.devices.split(",") if d.strip()] if args.devices else None,
             retries=max(0, cfg["retries"]), max_workers=cfg["max_workers"], max_tasks=args.max_tasks,

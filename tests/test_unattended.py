@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from unittest.mock import patch
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -310,6 +311,33 @@ class TestOptionalSteps(PatchedCase):
         fake.ui_xml = '<?xml version="1.0"?><hierarchy><node text="Skip" clickable="true" bounds="[10,10][30,30]"/></hierarchy>'
         res = gl_bulk.ACTIONS["wait-text"]["run"](self.ctx(), {"text": "Skip", "timeout": 0, "click": True, "optional": True})
         self.assertEqual(res["output"]["coords"], [20, 20])
+
+
+class TestKeepAwake(unittest.TestCase):
+    def test_sets_and_releases_the_execution_state_on_windows(self):
+        calls = []
+        with mock.patch.object(gl_cli.sys, "platform", "win32"),              mock.patch.object(gl_cli.keep_awake, "_set", lambda self, flags: calls.append(flags) or 1):
+            with gl_cli.keep_awake():
+                self.assertEqual(calls, [gl_cli.keep_awake.ES_CONTINUOUS | gl_cli.keep_awake.ES_SYSTEM_REQUIRED])
+        self.assertEqual(calls[-1], gl_cli.keep_awake.ES_CONTINUOUS)
+
+    def test_releases_even_when_the_run_raises(self):
+        calls = []
+        with mock.patch.object(gl_cli.sys, "platform", "win32"),              mock.patch.object(gl_cli.keep_awake, "_set", lambda self, flags: calls.append(flags) or 1):
+            with self.assertRaises(RuntimeError):
+                with gl_cli.keep_awake():
+                    raise RuntimeError("boom")
+        self.assertEqual(calls[-1], gl_cli.keep_awake.ES_CONTINUOUS)
+
+    def test_inactive_and_non_windows_do_nothing(self):
+        calls = []
+        with mock.patch.object(gl_cli.keep_awake, "_set", lambda self, flags: calls.append(flags) or 1):
+            with gl_cli.keep_awake(active=False):
+                pass
+            with mock.patch.object(gl_cli.sys, "platform", "linux"):
+                with gl_cli.keep_awake():
+                    pass
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":
