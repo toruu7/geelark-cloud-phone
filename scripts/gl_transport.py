@@ -66,8 +66,14 @@ class ApiTransport:
         if args and args[0] == "shell":
             return " ".join(args[1:])
         if args[:2] == ["exec-out", "uiautomator"]:
-            # `uiautomator dump /dev/tty` needs a terminal; dump to a file and print it instead
-            return f"uiautomator dump {UI_DUMP_PATH} >/dev/null 2>&1; cat {UI_DUMP_PATH}; rm -f {UI_DUMP_PATH}"
+            # `uiautomator dump /dev/tty` needs a terminal, and a busy page's full dump can exceed the API's output limit.
+            # Dump to a file and send back only the nodes that have text or a label, trimmed to what the parser reads.
+            keep = r"""sed -E 's|.* text="([^"]*)".* content-desc="([^"]*)".* clickable="([^"]*)".* bounds="([^"]*)".*|<node text="\1" content-desc="\2" clickable="\3" bounds="\4"/>|'"""
+            # the dump fails with "could not get idle state" while a video animates, so retry a few times
+            dump = f"for i in 1 2 3; do uiautomator dump {UI_DUMP_PATH} >/dev/null 2>&1 && [ -s {UI_DUMP_PATH} ] && break; sleep 1; done"
+            return (f"{dump}; echo '<?xml version=\"1.0\"?><hierarchy>'; "
+                    f"grep -o '<node [^>]*>' {UI_DUMP_PATH} | grep -E ' (text|content-desc)=\"[^\"]' | {keep}; "
+                    f"echo '</hierarchy>'; rm -f {UI_DUMP_PATH}")
         return None
 
     # -- transport surface ---------------------------------------------------------------------------------

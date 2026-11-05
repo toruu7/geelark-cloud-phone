@@ -61,6 +61,14 @@ class TestApiTransport(unittest.TestCase):
         t.run(["exec-out", "uiautomator", "dump", "/dev/tty"])
         self.assertIn("uiautomator dump " + gl_transport.UI_DUMP_PATH, self.api.calls[-1][1]["cmd"])
 
+    def test_uiautomator_command_keeps_its_capture_references(self):
+        cmd = gl_transport.ApiTransport._to_command(["exec-out", "uiautomator", "dump", "/dev/tty"])
+        self.assertEqual([c for c in cmd if ord(c) < 32], [])
+        for n in "1234":
+            self.assertIn(chr(92) + n, cmd)
+        self.assertIn("<hierarchy>", cmd)
+        self.assertIn("</hierarchy>", cmd)
+
     def test_unsupported_command_is_an_error_not_a_call(self):
         res = gl_transport.ApiTransport("123").run(["push", "a", "b"])
         self.assertEqual(res["returncode"], 2)
