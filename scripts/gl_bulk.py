@@ -300,6 +300,132 @@ def _r_deep_link(ctx, p):
     return ok("link opened", {"url": p["url"][:200]})
 
 
+# ---------------------------------------------------------------------------
+# description-link: open a YouTube video, open its description, tap one link, screenshot, go back.
+# Safe by default: every tap needs positive confirmation first, and when it cannot get it the task fails without tapping.
+# A pre-roll ad covers the title area and has its own "More info" / "Learn more" buttons, so "ad is over" is never assumed
+# from an unreadable screen (the UI dump fails on a busy watch page).
+# ---------------------------------------------------------------------------
+YOUTUBE_URL_RE = re.compile(r"^https://(www\.|m\.)?(youtube\.com|youtu\.be)/\S+$")
+AD_MARKERS = ("sponsored", "skip ad", "visit advertiser", "visit site", "my ad center", "like ad", "share ad",
+              "close ad panel", "more info", "book now", "learn more")
+SKIP_LABELS = ("skip ad", "skip ads", "skip")
+
+
+def _desc_link_args(p):
+    url, text = p.get("url"), p.get("link_text")
+    if p.get("spec") and not (url and text):
+        left, _, right = str(p["spec"]).partition("|")   # "video link | link text" (one value cell in the sheet)
+        url, text = left.strip(), right.strip()
+    return url, (str(text).strip() if text else text)
+
+
+def _v_description_link(p):
+    url, text = _desc_link_args(p)
+    if not url or not YOUTUBE_URL_RE.match(str(url)):
+        raise TaskError("needs a YouTube video link (https://youtube.com/... or https://youtu.be/...)")
+    if not text or not (3 <= len(text) <= 200):
+        raise TaskError("needs the link text to look for in the description (3-200 characters): 'link_text', or 'spec' as 'video link | link text'")
+    _num(p, "ad_wait_s", 20, 180, 90)
+    _num(p, "settle_s", 3, 30, 12)
+    _num(p, "more_x", 0, 1, 0.636)
+    _num(p, "more_y", 0, 1, 0.371)
+
+
+def _label(node):
+    return (node["text"] or node["desc"]).strip()
+
+
+def _ad_on_screen(nodes):
+    return any(m in (n["text"] + " " + n["desc"]).lower() for n in nodes for m in AD_MARKERS)
+
+
+def _tap_center(ctx, node):
+    x1, y1, x2, y2 = node["bounds"]
+    return ctx.adb(["shell", "input", "tap", str((x1 + x2) // 2), str((y1 + y2) // 2)])["returncode"] == 0
+
+
+def _r_description_link(ctx, p):
+    url, text = _desc_link_args(p)
+    ad_wait = _num(p, "ad_wait_s", 20, 180, 90)
+    settle = _num(p, "settle_s", 3, 30, 12)
+    shots = []
+
+    def shot():
+        res = _r_screenshot(ctx, {})
+        if res["status"] == "success":
+            shots.append(res["output"]["path"])
+
+    res = ctx.adb(["shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", gl_adb.shell_quote(url),
+                   "-p", "com.google.android.youtube"])
+    if _adb_error(res):
+        return fail("could not open the video", {"detail": (res["stdout"] + " " + res["stderr"])[:300]})
+
+    # 1) wait for any ad to finish. An ad counts as over only after 3 reads in a row without ad controls, and only once an ad
+    #    was seen or ~15 s passed without one (an ad shows within a few seconds). Skip is tapped only on an exact "Skip" label.
+    started = time.monotonic()
+    end = started + ad_wait
+    seen_ad, clear = False, 0
+    while True:
+        nodes = ui_nodes(ctx)
+        if _ad_on_screen(nodes):
+            seen_ad, clear = True, 0
+            skip = next((n for n in nodes if _label(n).lower() in SKIP_LABELS), None)
+            if skip:
+                _tap_center(ctx, skip)
+        else:
+            clear += 1
+        if clear >= 3 and (seen_ad or time.monotonic() - started >= 15):
+            break
+        if time.monotonic() >= end:
+            shot()
+            return fail(f"an ad was still on screen after {int(ad_wait)}s; nothing was tapped", {"screenshots": shots})
+        ctx.wait(2)
+
+    # 2) never tap outside the YouTube app
+    fg = foreground_package(ctx) or ""
+    if not fg.startswith("com.google.android.youtube"):
+        shot()
+        return fail(f"YouTube is not in the foreground ({fg or 'unknown'}); nothing was tapped", {"screenshots": shots})
+
+    # 3) one tap on the title row opens the description
+    if not ctx.tap_normalized(_num(p, "more_x", 0, 1, 0.636), _num(p, "more_y", 0, 1, 0.371)):
+        return fail("could not tap the description row")
+    ctx.wait(3)
+
+    # 4) confirm the description really opened (and an ad panel did not) before touching anything else
+    confirmed, ad_opened, nodes = False, False, []
+    for _ in range(3):
+        nodes = ui_nodes(ctx)
+        if _ad_on_screen(nodes):
+            ad_opened = True
+            break
+        if any(_label(n).lower().startswith("description") for n in nodes) or \
+                any(text.lower() in (n["text"] + " " + n["desc"]).lower() for n in nodes):
+            confirmed = True
+            break
+        ctx.wait(2)
+    shot()
+    if ad_opened:
+        return fail("an ad panel opened instead of the description; nothing else was tapped", {"screenshots": shots})
+    if not confirmed:
+        return fail("could not confirm the description opened; the link was not tapped", {"screenshots": shots})
+
+    # 5) tap the link by its text
+    link = next((n for n in sorted(nodes, key=lambda n: not n["clickable"])
+                 if text.lower() in (n["text"] + " " + n["desc"]).lower()), None)
+    if link is None:
+        return fail(f"link text '{text[:60]}' was not found in the description", {"screenshots": shots})
+    if not _tap_center(ctx, link):
+        return fail("could not tap the link", {"screenshots": shots})
+    ctx.wait(settle)
+    shot()
+    for _ in range(2):                    # leave the link page, then the description
+        ctx.adb(["shell", "input", "keyevent", gl_adb.KEYCODES["back"]])
+        ctx.wait(1)
+    return ok("opened the description link", {"link_text": text[:80], "ad_seen": seen_ad, "screenshots": shots})
+
+
 def _v_key(p):
     name = _str(p, "name").lower()
     if name not in gl_adb.KEYCODES:
@@ -486,6 +612,7 @@ ACTIONS = {
     "wait-text": {"validate": _v_ui_text, "run": _r_wait_text},
     "assert-text": {"validate": _v_ui_text, "run": _r_assert_text},
     "check-device": {"validate": _v_check, "run": _r_check},
+    "description-link": {"validate": _v_description_link, "run": _r_description_link},
     "flow": {"validate": _v_flow, "run": _r_flow},
 }
 
