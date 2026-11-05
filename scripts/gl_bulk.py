@@ -336,8 +336,14 @@ def _label(node):
     return (node["text"] or node["desc"]).strip()
 
 
+AD_ZONE_BOTTOM = 530      # px on a 720x1440 screen: a pre-roll ad's controls sit in the player and the panel under it
+
+
 def _ad_on_screen(nodes):
-    return any(m in (n["text"] + " " + n["desc"]).lower() for n in nodes for m in AD_MARKERS)
+    """A pre-roll ad (or an ad panel) is on screen. Only the top of the screen counts: an in-feed ad further down the page
+    (below the comments) has its own "Sponsored" / "Learn more" but does not cover the title row."""
+    return any(m in (n["text"] + " " + n["desc"]).lower()
+               for n in nodes if n["bounds"][1] < AD_ZONE_BOTTOM for m in AD_MARKERS)
 
 
 def _tap_center(ctx, node):

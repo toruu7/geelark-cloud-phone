@@ -123,6 +123,20 @@ class TestDescriptionLink(unittest.TestCase):
         self.run_task(phone, step=1)
         self.assertTrue(phone.tap_times and phone.tap_times[0] >= 15, phone.tap_times)
 
+    def test_an_in_feed_ad_below_the_comments_does_not_block_the_task(self):
+        feed_ad = [node(text="Sponsored", bounds=(17, 900, 144, 960), clickable=True),
+                   node(desc="Learn more", bounds=(100, 1200, 600, 1260), clickable=True)]
+        # pre-roll seen once, then the page reads as only the in-feed ad (3 times), then the description sheet
+        phone = Phone([AD, feed_ad, feed_ad, feed_ad, SHEET])
+        res = self.run_task(phone)
+        self.assertEqual(res["status"], "success", res)
+        self.assertEqual(phone.taps[-1], (350, 820))
+
+    def test_pre_roll_markers_at_the_top_still_count(self):
+        self.assertTrue(gl_bulk._ad_on_screen([node(text="Sponsored", bounds=(17, 375, 144, 434))]))
+        self.assertTrue(gl_bulk._ad_on_screen([node(desc="Visit advertiser", bounds=(540, 42, 717, 120))]))
+        self.assertFalse(gl_bulk._ad_on_screen([node(text="Sponsored", bounds=(17, 900, 144, 960))]))
+
     def test_description_not_confirmed_never_taps_the_link(self):
         phone = Phone([AD, [], [], [], []])                   # after the ad, the page stays unreadable
         res = self.run_task(phone)
