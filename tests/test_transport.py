@@ -61,13 +61,29 @@ class TestApiTransport(unittest.TestCase):
         t.run(["exec-out", "uiautomator", "dump", "/dev/tty"])
         self.assertIn("uiautomator dump " + gl_transport.UI_DUMP_PATH, self.api.calls[-1][1]["cmd"])
 
-    def test_uiautomator_command_keeps_its_capture_references(self):
+    def test_uiautomator_command_is_short_and_plain(self):
         cmd = gl_transport.ApiTransport._to_command(["exec-out", "uiautomator", "dump", "/dev/tty"])
+        self.assertLess(len(cmd), 260)          # the API rejects long commands with an empty failure
+        self.assertNotIn("echo", cmd)
+        self.assertNotIn("sed", cmd)
         self.assertEqual([c for c in cmd if ord(c) < 32], [])
-        for n in "1234":
-            self.assertIn(chr(92) + n, cmd)
-        self.assertIn("<hierarchy>", cmd)
-        self.assertIn("</hierarchy>", cmd)
+
+    def test_ui_dump_is_wrapped_into_parseable_xml(self):
+        self.api.shell["uiautomator"] = (
+            '<node index="0" text="Skip" resource-id="" content-desc="" clickable="true" bounds="[10,20][110,60]">'
+            + chr(10) +
+            '<node index="1" text="" content-desc="Video player" clickable="false" bounds="[0,0][720,444]"/>')
+        res = gl_transport.ApiTransport("123").run(["exec-out", "uiautomator", "dump", "/dev/tty"])
+        self.assertEqual(res["returncode"], 0)
+        nodes = gl_bulk.parse_ui_nodes(res["stdout"])
+        self.assertEqual([(n["text"], n["desc"], n["clickable"]) for n in nodes],
+                         [("Skip", "", True), ("", "Video player", False)])
+
+    def test_ui_dump_retries_then_reports_failure(self):
+        with mock.patch("time.sleep"):
+            res = gl_transport.ApiTransport("123").run(["exec-out", "uiautomator", "dump", "/dev/tty"])
+        self.assertEqual(res["returncode"], 1)
+        self.assertEqual(len([c for c in self.api.calls if c[0] == "/open/v1/shell/execute"]), 3)
 
     def test_unsupported_command_is_an_error_not_a_call(self):
         res = gl_transport.ApiTransport("123").run(["push", "a", "b"])

@@ -66,14 +66,11 @@ class ApiTransport:
         if args and args[0] == "shell":
             return " ".join(args[1:])
         if args[:2] == ["exec-out", "uiautomator"]:
-            # `uiautomator dump /dev/tty` needs a terminal, and a busy page's full dump can exceed the API's output limit.
-            # Dump to a file and send back only the nodes that have text or a label, trimmed to what the parser reads.
-            keep = r"""sed -E 's|.* text="([^"]*)".* content-desc="([^"]*)".* clickable="([^"]*)".* bounds="([^"]*)".*|<node text="\1" content-desc="\2" clickable="\3" bounds="\4"/>|'"""
-            # the dump fails with "could not get idle state" while a video animates, so retry a few times
-            dump = f"for i in 1 2 3; do uiautomator dump {UI_DUMP_PATH} >/dev/null 2>&1 && [ -s {UI_DUMP_PATH} ] && break; sleep 1; done"
-            return (f"{dump}; echo '<?xml version=\"1.0\"?><hierarchy>'; "
-                    f"grep -o '<node [^>]*>' {UI_DUMP_PATH} | grep -E ' (text|content-desc)=\"[^\"]' | {keep}; "
-                    f"echo '</hierarchy>'; rm -f {UI_DUMP_PATH}")
+            # `uiautomator dump /dev/tty` needs a terminal. Dump to a file and send back only the nodes that carry text or a
+            # label. Keep this command short: the API rejects long or fancy ones (an echo of an XML header, a retry loop,
+            # a long sed) with an empty failure. The XML wrapper and the retries are done in _ui_dump instead.
+            return (f"uiautomator dump {UI_DUMP_PATH} >/dev/null 2>&1; grep -o '<node [^>]*>' {UI_DUMP_PATH}"
+                    f" | grep -E ' (text|content-desc)=\"[^\"]'; rm -f {UI_DUMP_PATH}")
         return None
 
     # -- transport surface ---------------------------------------------------------------------------------
@@ -81,6 +78,23 @@ class ApiTransport:
         cmd = self._to_command(args)
         if cmd is None:
             return {"returncode": 2, "stdout": "", "stderr": f"not supported over the GeeLark API: {list(args)[:2]}"}
+        if [str(a) for a in args][:2] == ["exec-out", "uiautomator"]:
+            return self._ui_dump(cmd, timeout)
+        return self._shell(cmd, timeout)
+
+    def _ui_dump(self, cmd, timeout):
+        """The phone returns the labelled <node ...> tags; wrap them into the XML the parser reads. uiautomator fails with
+        "could not get idle state" while a video animates, so an empty answer is retried."""
+        for _ in range(3):
+            res = self._shell(cmd, timeout)
+            tags = [ln.strip() for ln in res["stdout"].splitlines() if ln.strip().startswith("<node ")]
+            if res["returncode"] == 0 and tags:
+                body = "\n".join(t if t.endswith("/>") else t[:-1] + "/>" for t in tags)
+                return {"returncode": 0, "stdout": '<?xml version="1.0"?><hierarchy>\n' + body + "\n</hierarchy>", "stderr": ""}
+            time.sleep(2)
+        return {"returncode": 1, "stdout": "", "stderr": "could not read the screen (UI dump returned nothing)"}
+
+    def _shell(self, cmd, timeout):
         res = self._call("/open/v1/shell/execute", {"id": self.phone_id, "cmd": cmd}, timeout=max(30, int(timeout or 0)))
         if res.get("status") != "success":
             return {"returncode": 1, "stdout": "", "stderr": str(res.get("message") or res.get("code") or "api error")[:300]}
