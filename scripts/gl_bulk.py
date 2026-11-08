@@ -343,6 +343,7 @@ def _v_description_link(p):
     if not text or not (3 <= len(text) <= 200):
         raise TaskError("needs the link text to look for in the description (3-200 characters): 'link_text', or 'spec' as 'video link | link text'")
     _num(p, "ad_wait_s", 20, 180, 90)
+    _num(p, "ad_blind_wait_s", 15, 120, 50)
     _num(p, "settle_s", 3, 30, 12)
     _num(p, "more_x", 0, 1, 0.636)
     _desc_row_y(p)
@@ -370,6 +371,7 @@ def _tap_center(ctx, node):
 def _r_description_link(ctx, p):
     url, text = _desc_link_args(p)
     ad_wait = _num(p, "ad_wait_s", 20, 180, 90)
+    blind_wait = _num(p, "ad_blind_wait_s", 15, 120, 50)
     settle = _num(p, "settle_s", 3, 30, 12)
     shots = []
 
@@ -383,8 +385,10 @@ def _r_description_link(ctx, p):
     if _adb_error(res):
         return fail("could not open the video", {"detail": (res["stdout"] + " " + res["stderr"])[:300]})
 
-    # 1) wait for any ad to finish. An ad counts as over only after 3 reads in a row without ad controls, and only once an ad
-    #    was seen or ~15 s passed without one (an ad shows within a few seconds). Skip is tapped only on an exact "Skip" label.
+    # 1) wait for any ad to finish. An ad counts as over only after 3 reads in a row without ad controls, and only once an
+    #    ad was seen, or `blind_wait` seconds passed without seeing one. That second rule matters: an ad screen is not always
+    #    readable (seen on a newer YouTube layout), so "no ad seen" is not proof of "no ad"; the fallback must outlast a
+    #    typical pre-roll (up to ~30 s unskippable). Skip is tapped only on an exact "Skip" label.
     started = time.monotonic()
     end = started + ad_wait
     seen_ad, clear, ad_last = False, 0, False
@@ -402,7 +406,7 @@ def _r_description_link(ctx, p):
                     _tap_center(ctx, skip)
             else:
                 clear += 1
-            if clear >= 3 and (seen_ad or time.monotonic() - started >= 15):
+            if clear >= 3 and (seen_ad or time.monotonic() - started >= blind_wait):
                 break
             if time.monotonic() >= end:
                 shot()

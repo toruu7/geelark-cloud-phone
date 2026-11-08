@@ -130,15 +130,24 @@ class TestDescriptionLink(unittest.TestCase):
     def test_unreadable_page_taps_only_the_title_row_and_never_the_link(self):
         # nothing readable and no ad ever seen: after 15 s the title row may be tapped, but with no confirmation no link is
         phone = Phone([[]])
-        res = self.run_task(phone)
+        res = self.run_task(phone, ad_wait_s=120)
         self.assertNotEqual(res["status"], "success")
         self.assertIn("confirm", res["message"])
         self.assertEqual(phone.taps, [(457, 534)])
 
-    def test_no_tap_in_the_first_fifteen_seconds_when_no_ad_was_seen(self):
+    def test_no_tap_before_the_blind_wait_when_no_ad_was_seen(self):
+        # an unreadable ad screen looks exactly like "no ad": the fallback wait must outlast a typical pre-roll
         phone = Phone([[]])
-        self.run_task(phone, step=1)
-        self.assertTrue(phone.tap_times and phone.tap_times[0] >= 15, phone.tap_times)
+        self.run_task(phone, step=1, ad_wait_s=120)
+        self.assertTrue(phone.tap_times and phone.tap_times[0] >= 50, phone.tap_times)
+
+    def test_the_blind_wait_can_be_changed_and_is_validated(self):
+        phone = Phone([[]])
+        self.run_task(phone, step=1, ad_wait_s=120, ad_blind_wait_s=80)
+        self.assertTrue(phone.tap_times and phone.tap_times[0] >= 80, phone.tap_times)
+        gl_bulk._v_description_link({"spec": VIDEO + " | danmartell.com", "ad_blind_wait_s": 60})
+        with self.assertRaises(gl_bulk.TaskError):
+            gl_bulk._v_description_link({"spec": VIDEO + " | danmartell.com", "ad_blind_wait_s": 5})
 
     def test_an_in_feed_ad_below_the_comments_does_not_block_the_task(self):
         feed_ad = [node(text="Sponsored", bounds=(17, 900, 144, 960), clickable=True),
