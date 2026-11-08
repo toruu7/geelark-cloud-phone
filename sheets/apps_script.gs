@@ -338,7 +338,7 @@ function enqueue_(opts) {
   });
 
   routine.forEach(function (r) {
-    var targetName = String(r.phone || '').trim();
+    var targetName = String(r.phone || r['phone group'] || '').trim();   // header may be "phone" or "phone group"
     var taskName = String(r.task || '').trim();
     if (!targetName && !taskName) return;                      // empty row
     if (!truthy_(r.enabled)) return;                           // switched off

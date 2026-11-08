@@ -150,6 +150,19 @@ test('the new spend-cap settings exist with the agreed defaults', () => {
 });
 
 
+
+test('the Routine column headed "phone group" works the same as one headed "phone"', () => {
+  const env = fresh();
+  env.clearExamples();
+  env.addPhone(true, 'A1', 'cloud', 'id-a1', 'Crew');
+  env.addPhone(true, 'A2', 'cloud', 'id-a2', 'Crew');
+  env.addRoutine(true, 'Crew', 'Press Home');
+  env.sheet('Routine').set(1, 2, 'phone group');                       // somebody renamed the header for clarity
+  const r = env.ctx.enqueue_({ batch: '2026-11-03', dryRun: true });
+  deepEqual(r.problems, []);
+  deepEqual(r.plan.map((p) => p.task_id), ['2026-11-03-a1-01', '2026-11-03-a2-01']);
+});
+
 // ---------------------------------------------------------------- playbooks
 test('setup seeds the Watch and Browse playbooks once and never re-adds them after they are edited', () => {
   const env = fresh();
