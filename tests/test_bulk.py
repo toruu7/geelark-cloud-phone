@@ -71,7 +71,7 @@ class FakeAdb:
 class FakeSheet:
     def __init__(self, tasks=None, claim_error=False):
         self.queue = list(tasks or [])
-        self.reports, self.logs, self.summaries = [], [], []
+        self.reports, self.logs, self.summaries, self.costs = [], [], [], []
         self.claim_error = claim_error
         self.lock = threading.Lock()
         self.reject_writes = False
@@ -99,7 +99,7 @@ class FakeSheet:
         if self.reject_writes:
             return {"ok": False, "error": "request_failed"}
         with self.lock:
-            {"report": self.reports, "log": self.logs, "summary": self.summaries}[verb].append(payload)
+            {"report": self.reports, "log": self.logs, "summary": self.summaries, "cost": self.costs}[verb].append(payload)
         return {"ok": True}
 
     def ping(self):

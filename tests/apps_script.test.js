@@ -23,12 +23,12 @@ const T0 = '2026-11-03T08:00:00Z';   // 08:00 UTC, before the default 09:00 run 
 test('setup creates every tab, seeds the library and settings, installs one trigger', () => {
   const env = load();
   env.setup();
-  for (const n of ['Tasks', 'Reports', 'Runs', 'Routine', 'Phones', 'Library', 'Playbooks', 'Settings', 'Overview', '_state']) assert.ok(env.sheet(n), n);
+  for (const n of ['Tasks', 'Reports', 'Runs', 'Routine', 'Phones', 'Library', 'Playbooks', 'Settings', 'Costs', 'Overview', '_state']) assert.ok(env.sheet(n), n);
   assert.ok(env.rows('Library').length >= 15);
   deepEqual(env.state.triggers, ['tick']);
   env.setup();                                                    // idempotent
   deepEqual(env.state.triggers, ['tick']);
-  assert.equal(env.rows('Settings').length, 14);
+  assert.equal(env.rows('Settings').length, 16);
   const names = env.rows('Library').map((r) => r.name);
   assert.equal(new Set(names).size, names.length);
 });
@@ -436,6 +436,19 @@ test('log and summary rows are appended', () => {
   assert.equal(env.rows('Reports').at(-1).status, 'warning');
   const run = env.rows('Runs')[0];
   deepEqual([run.total, run.success, run.failed], [3, 2, 1]);
+});
+
+test('cost rows are logged per phone with a text date, and old ones are trimmed', () => {
+  const env = fresh();
+  env.post({ action: 'cost', run_id: 'r', device: 'P01', phone_id: 'p1', minutes: 3.456, cost: 0.0138, currency: 'USD' });
+  env.post({ action: 'cost', run_id: 'r', device: 'P02', phone_id: 'p2', minutes: 2, cost: '', currency: 'USD' });
+  const rows = env.rows('Costs');
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].device, 'P01');
+  assert.equal(rows[0].minutes, 3.456);
+  assert.equal(rows[0].cost, 0.0138);
+  assert.match(String(rows[0].date), /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(rows[1].cost, '');
 });
 
 // ---------------------------------------------------------------- daily report email

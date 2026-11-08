@@ -176,6 +176,15 @@ class Reporter:
             self._append(self.log_path, dict(payload, ts=now_iso(), kind="event"))
         self._send("log", payload)
 
+    def cost(self, device, phone_id, minutes, cost_per_minute=None, currency="USD"):
+        """One row per cloud phone per run: how long it was up (billing) and, when a rate is set, the estimated cost."""
+        payload = {"run_id": self.run_id, "device": device, "phone_id": str(phone_id), "minutes": round(float(minutes), 2),
+                   "cost": round(float(minutes) * cost_per_minute, 4) if cost_per_minute else "", "currency": currency or ""}
+        with self._lock:
+            self._append(self.log_path, dict(payload, ts=now_iso(), kind="cost"))
+        self._send("cost", payload)
+        return payload
+
     def summary(self, started, workers, total, notes=""):
         payload = {
             "run_id": self.run_id, "started": started, "finished": now_iso(), "workers": ",".join(workers),

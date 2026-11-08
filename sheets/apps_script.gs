@@ -20,7 +20,7 @@
  */
 
 var TAB = { TASKS: 'Tasks', REPORTS: 'Reports', RUNS: 'Runs', ROUTINE: 'Routine', PHONES: 'Phones',
-            LIBRARY: 'Library', PLAYBOOKS: 'Playbooks', SETTINGS: 'Settings', DASH: 'Overview', STATE: '_state' };
+            LIBRARY: 'Library', PLAYBOOKS: 'Playbooks', SETTINGS: 'Settings', COSTS: 'Costs', DASH: 'Overview', STATE: '_state' };
 
 var HEADERS = {
   Tasks: ['task_id', 'device', 'action', 'params', 'status', 'attempts', 'worker', 'claimed_at', 'finished_at', 'result',
@@ -32,7 +32,8 @@ var HEADERS = {
   Phones: ['enabled', 'label', 'type', 'phone_id', 'device', 'group', 'google_account', 'phone_number'],
   Library: ['name', 'action', 'params_template', 'value_hint', 'description'],
   Playbooks: ['playbook', 'task', 'value', 'duration_s', 'note'],
-  Settings: ['setting', 'value', 'help']
+  Settings: ['setting', 'value', 'help'],
+  Costs: ['date', 'timestamp', 'run_id', 'device', 'phone_id', 'minutes', 'cost', 'currency']
 };
 
 // Must match the runner's actions (scripts/gl_bulk.py ACTIONS); a test keeps the two lists in sync.
@@ -59,6 +60,8 @@ var DEFAULT_SETTINGS = [
   ['task_timeout_s', '120', 'Seconds one task attempt may take.'],
   ['max_phone_minutes', '8', 'Spend cap: a cloud phone takes no new task once it has been up this many minutes.'],
   ['daily_phone_minutes', '120', 'Spend cap: total cloud phone-minutes per day. Once reached, no new phone or task starts.'],
+  ['cost_per_phone_minute', '', 'Your GeeLark price for one phone-minute (a number, e.g. 0.004). Blank = minutes are logged but no cost is calculated.'],
+  ['currency', 'USD', 'Label shown next to costs (USD, EUR, BDT ...).'],
   ['max_runtime_min', '120', 'After this many minutes a run starts no NEW tasks (unfinished ones stay pending).'],
   ['task_delay_s', '2', 'Pause between tasks on the same phone.'],
   ['keep_days', '14', 'How many days of finished tasks stay in the Tasks tab (Reports keep 90 days).'],
@@ -127,6 +130,7 @@ function doPost(e) {
       case 'report':   return out_(report_(body));
       case 'log':      return out_(log_(body));
       case 'summary':  return out_(summary_(body));
+      case 'cost':     return out_(cost_(body));
       case 'enqueue':  return out_(enqueueNow_(body));
       case 'inspect':  return out_(inspect_());
       default:         return out_({ ok: false, error: 'unknown_action' });
@@ -214,6 +218,20 @@ function log_(body) {
     timestamp: NOW_().toISOString(), run_id: body.run_id || '', task_id: body.task_id || '', device: body.device || '',
     action: body.task_action || 'event', status: body.level || 'info', message: clip_(body.message), output: clip_(body.output)
   });
+  return { ok: true };
+}
+
+// One row per cloud phone per run: minutes the phone was up (that is what GeeLark bills) and the estimated cost when a
+// rate is set in Settings (cost_per_phone_minute). The date is kept as text so the Overview can sum a day.
+function cost_(body) {
+  var sh = sheet_(TAB.COSTS);
+  var row = sh.getLastRow() + 1;
+  var tz = tz_(settingsMap_());
+  sh.getRange(row, 1).setNumberFormat('@');
+  var cost = body.cost === '' || body.cost === undefined || body.cost === null ? '' : Number(body.cost);
+  sh.getRange(row, 1, 1, 8).setValues([[Utilities.formatDate(NOW_(), tz, 'yyyy-MM-dd'), NOW_().toISOString(), body.run_id || '',
+    String(body.device || ''), String(body.phone_id || ''), Number(body.minutes) || 0, isNaN(cost) ? '' : cost,
+    String(body.currency || '')]]);
   return { ok: true };
 }
 
@@ -503,6 +521,8 @@ function trim_() {
   });
   var repCut = new Date(NOW_().getTime() - REPORT_KEEP_DAYS * 86400000);
   rewriteWithout_(TAB.REPORTS, function (o) { return o.timestamp && new Date(o.timestamp) < repCut; });
+  var costCut = new Date(NOW_().getTime() - 400 * 86400000);
+  rewriteWithout_(TAB.COSTS, function (o) { return o.timestamp && new Date(o.timestamp) < costCut; });
 }
 
 function rewriteWithout_(name, shouldDrop) {

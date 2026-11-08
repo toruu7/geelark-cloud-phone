@@ -744,7 +744,8 @@ def load_tasks_file(path):
 # ---------------------------------------------------------------------------
 DEFAULT_SETTINGS = {"retries": 1, "max_workers": 8, "max_cloud_phones": 2, "task_timeout": 120.0,
                     "task_delay": 0.0, "max_runtime": None, "on_failure": "continue",
-                    "max_phone_minutes": 8.0, "daily_phone_minutes": 120.0}
+                    "max_phone_minutes": 8.0, "daily_phone_minutes": 120.0,
+                    "cost_per_minute": None, "currency": "USD"}
 
 
 def _as_int(v):
@@ -764,6 +765,7 @@ _SHEET_SETTINGS = {
     "max_runtime": ("max_runtime_min", _minutes_to_s, 60, 24 * 3600),
     "max_phone_minutes": ("max_phone_minutes", float, 1, 240),
     "daily_phone_minutes": ("daily_phone_minutes", float, 1, 10000),
+    "cost_per_minute": ("cost_per_phone_minute", float, 0, 1000),
 }
 
 
@@ -780,6 +782,13 @@ def resolve_settings(cli, sheet):
                 out[key] = raw
             elif raw:
                 ignored.append(f"on_failure={raw!r}")
+            continue
+        if key == "currency":
+            raw = str(sheet.get("currency", "")).strip().upper()
+            if re.fullmatch(r"[A-Z$€£]{1,4}", raw):
+                out[key] = raw
+            elif raw:
+                ignored.append(f"currency={raw!r}")
             continue
         spec = _SHEET_SETTINGS.get(key)
         raw = sheet.get(spec[0]) if spec else None
@@ -866,7 +875,7 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
              task_timeout=120, task_delay=0.0, dry_run=False, log_dir=None, run_id=None,
              cloud=False, max_cloud_phones=2, cloud_up_timeout=180,
              only_cloud=False, max_runtime=None, on_failure="continue", probe=False, transport="adb",
-             max_phone_minutes=None, daily_phone_minutes=None):
+             max_phone_minutes=None, daily_phone_minutes=None, cost_per_minute=None, currency="USD"):
     """Run tasks in parallel, one worker per phone. `tasks` = local list; otherwise tasks are claimed from `client`'s sheet.
 
     Local ADB phones are addressed by serial. GeeLark cloud phones are addressed as `cloud:<phone_id>`; they are only
@@ -973,7 +982,7 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
     limit_logged = {"done": False}
     budget = {"left": max_tasks if max_tasks else float("inf"), "total": len(invalid)}
     stop = threading.Event()
-    cloud_state = {"started": set(), "stopped": set(), "billed_s": 0.0, "stop_failures": [], "active": {}}
+    cloud_state = {"started": set(), "stopped": set(), "billed_s": 0.0, "stop_failures": [], "active": {}, "per_phone_s": {}}
     phone_cap_s = max_phone_minutes * 60 if max_phone_minutes else None
     daily_cap_s = daily_phone_minutes * 60 if daily_phone_minutes else None
     daily_prior_s = daily_used_s(reporter.log_dir) if daily_cap_s else 0.0
@@ -1126,9 +1135,15 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
             reporter.event("error", f"cloud worker crashed: {type(e).__name__}: {e}", name)
         finally:
             stop_cloud(name)
+            up_s = time.monotonic() - t0
             with lock:
                 cloud_state["active"].pop(name, None)
-                cloud_state["billed_s"] += time.monotonic() - t0
+                cloud_state["billed_s"] += up_s
+                cloud_state["per_phone_s"][name] = up_s
+            try:
+                reporter.cost(name, pid, up_s / 60, cost_per_minute, currency)
+            except Exception as e:                 # a cost row must never break a run or hide a stopped phone
+                reporter.event("warning", f"could not record the cost: {e}", name)
 
     threads = [threading.Thread(target=work, args=(n, s, False), name=f"bulk-{n}", daemon=True) for n, s in local_workers]
     threads += [threading.Thread(target=cloud_worker, args=(n,), name=f"bulk-{n}", daemon=True) for n, _ in cloud_workers]
@@ -1176,7 +1191,10 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
             "transport": transport,
             "cloud": {"started": sorted(cloud_state["started"]), "stopped": sorted(cloud_state["stopped"]),
                       "stop_failures": cloud_state["stop_failures"],
-                      "phone_minutes": round(cloud_state["billed_s"] / 60, 1)},
+                      "phone_minutes": round(cloud_state["billed_s"] / 60, 1),
+                      "per_phone_minutes": {n: round(s / 60, 2) for n, s in sorted(cloud_state["per_phone_s"].items())},
+                      "estimated_cost": round(cloud_state["billed_s"] / 60 * cost_per_minute, 4) if cost_per_minute else None,
+                      "currency": currency},
             "caps": {"daily_phone_minutes": daily_phone_minutes, "daily_used_minutes": round(day_total_s / 60, 1),
                      "max_phone_minutes": max_phone_minutes, "daily_cap_reached": cap_hit["daily"],
                      "phones_capped": sorted(cap_hit["phone"])}}

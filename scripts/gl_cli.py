@@ -112,7 +112,13 @@ def _merge_waves(results):
     out["cloud"] = {"started": sorted({d for c in clouds for d in c.get("started", [])}),
                     "stopped": sorted({d for c in clouds for d in c.get("stopped", [])}),
                     "stop_failures": [d for c in clouds for d in c.get("stop_failures", [])],
-                    "phone_minutes": round(sum(c.get("phone_minutes", 0) for c in clouds), 1)}
+                    "phone_minutes": round(sum(c.get("phone_minutes", 0) for c in clouds), 1),
+                    "per_phone_minutes": {}, "estimated_cost": None, "currency": clouds[-1].get("currency")}
+    for c in clouds:
+        for n, m in (c.get("per_phone_minutes") or {}).items():
+            out["cloud"]["per_phone_minutes"][n] = round(out["cloud"]["per_phone_minutes"].get(n, 0) + m, 2)
+    if any(c.get("estimated_cost") is not None for c in clouds):
+        out["cloud"]["estimated_cost"] = round(sum(c.get("estimated_cost") or 0 for c in clouds), 4)
     out["sheet_write_failures"] = sum(r.get("sheet_write_failures", 0) for r in results)
     caps = dict(results[-1].get("caps") or {})
     caps["daily_cap_reached"] = any((r.get("caps") or {}).get("daily_cap_reached") for r in results)
@@ -169,7 +175,8 @@ def _bulk_run(args):
                     task_timeout=cfg["task_timeout"], task_delay=cfg["task_delay"], dry_run=args.dry_run, log_dir=args.log_dir,
                     cloud=args.cloud, max_cloud_phones=cfg["max_cloud_phones"], cloud_up_timeout=args.cloud_up_timeout,
                     only_cloud=args.only_cloud, max_runtime=cfg["max_runtime"], on_failure=cfg["on_failure"], probe=args.probe,
-                    transport=transport, max_phone_minutes=cfg["max_phone_minutes"], daily_phone_minutes=cfg["daily_phone_minutes"])
+                    transport=transport, max_phone_minutes=cfg["max_phone_minutes"], daily_phone_minutes=cfg["daily_phone_minutes"],
+                    cost_per_minute=cfg["cost_per_minute"], currency=cfg["currency"])
                 if wave > 0 and r.get("status") == "idle":
                     break                                  # nothing left for a further wave
                 results.append(r)
