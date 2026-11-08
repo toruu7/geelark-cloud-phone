@@ -29,7 +29,7 @@ var HEADERS = {
             'phone', 'task'],
   Runs: ['run_id', 'started', 'finished', 'workers', 'total', 'success', 'failed', 'other', 'notes'],
   Routine: ['enabled', 'phone', 'task', 'value', 'duration_s', 'note'],
-  Phones: ['enabled', 'label', 'type', 'phone_id', 'device', 'group'],
+  Phones: ['enabled', 'label', 'type', 'phone_id', 'device', 'group', 'google_account', 'phone_number'],
   Library: ['name', 'action', 'params_template', 'value_hint', 'description'],
   Playbooks: ['playbook', 'task', 'value', 'duration_s', 'note'],
   Settings: ['setting', 'value', 'help']
