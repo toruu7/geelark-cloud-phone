@@ -22,6 +22,7 @@ SPOOL_NAME = ".report_spool.jsonl"
 # 401 is retried because Apps Script returns it transiently (e.g. right after a redeploy); a wrong secret
 # is answered with a normal JSON {ok:false,error:'unauthorized'}, never a 401, so retrying cannot hide misconfiguration.
 RETRY_STATUSES = {401, 429, 500, 502, 503, 504}
+READ_VERBS = {"ping", "devices", "settings"}     # safe to repeat after an HTML reply
 
 
 class SheetsError(RuntimeError):
@@ -76,6 +77,13 @@ class SheetsClient:
                 try:
                     data = json.loads(raw)
                 except ValueError:
+                    # Under load Apps Script sometimes answers a call with an HTML page. Re-asking is safe for pure reads.
+                    # Writes are not retried here (a repeat could duplicate a row); they go to the spool instead, and a
+                    # claim that hits this is retried by the worker's own loop.
+                    if verb in READ_VERBS and attempt < self.retries:
+                        last = "non_json_response"
+                        time.sleep(min(8.0, 0.8 * (2 ** attempt)))
+                        continue
                     return {"ok": False, "error": "non_json_response", "detail": raw[:200]}
                 return data if isinstance(data, dict) else {"ok": False, "error": "bad_response"}
             except urllib.error.HTTPError as e:

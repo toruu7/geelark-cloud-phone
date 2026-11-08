@@ -524,6 +524,19 @@ class TestSheetsClient(unittest.TestCase):
             self.assertFalse(c.call("ping")["ok"])
         self.assertEqual(uo.call_count, 1)
 
+    def test_html_reply_is_retried_for_reads_but_not_writes(self):
+        c = gl_sheets.SheetsClient(self.URL, "s", retries=2)
+        with patch("time.sleep"):
+            with patch("urllib.request.urlopen", side_effect=[_Resp("<html>busy</html>"), _Resp('{"ok": true}')]) as uo:
+                self.assertTrue(c.call("settings")["ok"])
+            self.assertEqual(uo.call_count, 2)
+            with patch("urllib.request.urlopen", return_value=_Resp("<html>busy</html>")) as uo:
+                self.assertEqual(c.call("report", row={})["error"], "non_json_response")
+            self.assertEqual(uo.call_count, 1)                  # a write is never repeated blindly
+            with patch("urllib.request.urlopen", return_value=_Resp("<html>busy</html>")) as uo:
+                self.assertEqual(c.call("devices")["error"], "non_json_response")
+            self.assertEqual(uo.call_count, 3)                  # a read gives up after its retries
+
     def test_transient_401_is_retried(self):
         c = gl_sheets.SheetsClient(self.URL, "s", retries=2)
         err = urllib.error.HTTPError("u", 401, "Unauthorized", {}, io.BytesIO(b""))
@@ -533,7 +546,7 @@ class TestSheetsClient(unittest.TestCase):
         self.assertEqual(uo.call_count, 2)
 
     def test_non_json_and_error_responses(self):
-        c = gl_sheets.SheetsClient(self.URL, "s")
+        c = gl_sheets.SheetsClient(self.URL, "s", retries=0)
         with patch("urllib.request.urlopen", return_value=_Resp("<html>login</html>")):
             self.assertEqual(c.call("ping")["error"], "non_json_response")
         with patch("urllib.request.urlopen", return_value=_Resp('{"ok": false, "error": "unauthorized"}')):
