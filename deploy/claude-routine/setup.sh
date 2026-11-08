@@ -4,7 +4,7 @@
 # itself (which the cloud permission classifier blocks). To update the runner: change REF, save the environment.
 set -euo pipefail
 REPO=https://github.com/toruu7/geelark-cloud-phone
-REF=ee19f75235fcb51fbe4e8f2b0bc6b3a14b3e0cab
+REF=612313216f78bcfdf33a51af1c1f9420e12eb23f
 DEST=/opt/geelark
 rm -rf "$DEST"
 git clone --quiet "$REPO" "$DEST"
