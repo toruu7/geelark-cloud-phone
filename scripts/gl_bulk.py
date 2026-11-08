@@ -358,7 +358,7 @@ def _r_description_link(ctx, p):
     shots = []
 
     def shot():
-        res = _r_screenshot(ctx, {})
+        res = _r_screenshot(ctx, {"blockers": False})
         if res["status"] == "success":
             shots.append(res["output"]["path"])
 
@@ -504,8 +504,54 @@ def _r_sleep(ctx, p):
     return ok(f"slept {p['seconds']}s")
 
 
+# ---------------------------------------------------------------------------
+# Blocker detection. A task can "succeed" while the phone shows a wall: a bot check, "Video unavailable", Chrome's first-run
+# page. Those screens are static, so the UI dump can usually read them; a healthy playing video cannot be read at all.
+# So the rule is: a blocker is reported only on positive evidence (a known phrase on a readable screen). An unreadable
+# screen is never treated as a blocker, and never as proof that all is well either.
+# ---------------------------------------------------------------------------
+BLOCKERS = (
+    ("bot check", ("not a bot", "unusual traffic", "i'm not a robot", "captcha", "verify you are human", "verify you're human")),
+    ("video unavailable", ("video unavailable", "this content isn't available", "this video isn't available",
+                           "video isn't available", "this video is unavailable", "content unavailable")),
+    ("Chrome first-run screen", ("welcome to chrome", "accept & continue")),
+    ("Google verification prompt", ("verify it's you", "verify your identity", "verify your phone number",
+                                    "get a verification code", "couldn't sign you in")),
+    ("account problem", ("account has been disabled", "account has been suspended", "account has been terminated",
+                         "account is disabled")),
+    ("age check", ("confirm your age", "age-restricted")),
+    ("app error", ("something went wrong", "an error occurred", "playback error", "can't play this video")),
+    ("no connection", ("no internet connection", "you're offline", "check your connection")),
+)
+
+
+def find_blocker(nodes):
+    """(kind, text on screen) for the first blocker phrase found among UI nodes, else None."""
+    for node in nodes:
+        label = (node["text"] + " " + node["desc"]).lower().replace("\u2019", "'").replace("\u2018", "'")
+        if not label.strip():
+            continue
+        for kind, phrases in BLOCKERS:
+            if any(ph in label for ph in phrases):
+                return kind, (node["text"] or node["desc"]).strip()[:80]
+    return None
+
+
+def _read_screen_once(ctx):
+    """One quick read of the screen (a failed read on a busy page is slow, so no retries). [] when it cannot be read."""
+    tries = getattr(ctx.transport, "ui_tries", None)
+    if tries is not None:
+        ctx.transport.ui_tries = 1
+    try:
+        return ui_nodes(ctx)
+    finally:
+        if tries is not None:
+            ctx.transport.ui_tries = tries
+
+
 def _v_screenshot(p):
-    pass
+    if "blockers" in p and not isinstance(p["blockers"], bool):
+        raise TaskError("'blockers' must be true or false")
 
 
 def _r_screenshot(ctx, p):
@@ -522,7 +568,13 @@ def _r_screenshot(ctx, p):
     with open(path, "wb") as f:
         f.write(data)
     host = getattr(ctx.transport, "last_download_host", None)
-    return ok("screenshot saved", {"path": path, "bytes": len(data), **({"download_host": host} if host else {})})
+    out = {"path": path, "bytes": len(data), **({"download_host": host} if host else {})}
+    if p.get("blockers", True):                      # a screenshot that shows a wall is a failed task, not a success
+        hit = find_blocker(_read_screen_once(ctx))
+        if hit:
+            out["blocker"] = hit[0]
+            return fail(f"screenshot saved, but the screen shows a blocker: {hit[0]} ({hit[1]!r})", out)
+    return ok("screenshot saved", out)
 
 
 def _v_ui_text(p):
