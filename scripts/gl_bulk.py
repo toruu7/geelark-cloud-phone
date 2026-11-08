@@ -320,20 +320,32 @@ def _desc_link_args(p):
     return url, (str(text).strip() if text else text)
 
 
-def _desc_row_y(p):
-    """Where to tap the title row, as a fraction of the screen height. YouTube versions differ: the title row sits at about
-    0.37 on most phones but lower on newer layouts. An optional third field of `spec` sets it for one run
-    (`video link | link text | 0.39`); otherwise the `more_y` param, else 0.371."""
+def _desc_tap(p):
+    """Where to tap the title row, as fractions (x, y) of the screen. YouTube versions differ: on most phones the row sits at
+    about (0.636, 0.371); on a newer layout "more" is further right and lower (about 0.76, 0.39). An optional third field of
+    `spec` sets it for one run: a height (`... | 0.39`) or `x,y` (`... | 0.76,0.39`); otherwise the `more_x` / `more_y` params."""
     parts = [x.strip() for x in str(p.get("spec") or "").split("|")]
+    x, y = _num(p, "more_x", 0, 1, 0.636), _num(p, "more_y", 0, 1, 0.371)
     if len(parts) > 2 and parts[2]:
+        nums = [v.strip() for v in parts[2].split(",")]
         try:
-            y = float(parts[2])
+            vals = [float(v) for v in nums]
         except ValueError:
-            raise TaskError("the third field of the value (tap height) must be a number such as 0.39")
+            vals = []
+        if len(vals) not in (1, 2):
+            raise TaskError("the third field of the value (tap position) must be a height such as 0.39, or x,y such as 0.76,0.39")
+        if len(vals) == 2:
+            x = vals[0]
+        y = vals[-1]
         if not (0.2 <= y <= 0.6):
             raise TaskError("the tap height must be between 0.2 and 0.6 of the screen height")
-        return y
-    return _num(p, "more_y", 0, 1, 0.371)
+        if not (0.1 <= x <= 0.95):
+            raise TaskError("the tap x must be between 0.1 and 0.95 of the screen width")
+    return x, y
+
+
+def _desc_row_y(p):
+    return _desc_tap(p)[1]
 
 
 def _v_description_link(p):
@@ -345,8 +357,7 @@ def _v_description_link(p):
     _num(p, "ad_wait_s", 20, 180, 90)
     _num(p, "ad_blind_wait_s", 15, 120, 50)
     _num(p, "settle_s", 3, 30, 12)
-    _num(p, "more_x", 0, 1, 0.636)
-    _desc_row_y(p)
+    _desc_tap(p)
 
 
 def _label(node):
@@ -424,16 +435,19 @@ def _r_description_link(ctx, p):
         return fail(f"YouTube is not in the foreground ({fg or 'unknown'}); nothing was tapped", {"screenshots": shots})
 
     # 3) one tap on the title row opens the description
-    if not ctx.tap_normalized(_num(p, "more_x", 0, 1, 0.636), _desc_row_y(p)):
+    if not ctx.tap_normalized(*_desc_tap(p)):
         return fail("could not tap the description row")
     ctx.wait(3)
 
     # 4) confirm the description really opened (and an ad panel did not) before touching anything else
-    confirmed, ad_opened, nodes = False, False, []
+    confirmed, ad_opened, wrong_sheet, nodes = False, False, False, []
     for _ in range(3):
         nodes = ui_nodes(ctx)
         if _ad_on_screen(nodes):
             ad_opened = True
+            break
+        if any(_label(n).lower() in ("copy link", "share") for n in nodes) and                 not any(_label(n).lower().startswith("description") for n in nodes):
+            wrong_sheet = True       # the tap landed on Share (or similar); close it, never touch anything in it
             break
         if any(_label(n).lower().startswith("description") for n in nodes) or \
                 any(text.lower() in (n["text"] + " " + n["desc"]).lower() for n in nodes):
@@ -441,6 +455,10 @@ def _r_description_link(ctx, p):
             break
         ctx.wait(2)
     shot()
+    if wrong_sheet:
+        ctx.adb(["shell", "input", "keyevent", gl_adb.KEYCODES["back"]])
+        return fail("the tap opened the Share sheet, not the description (closed it); set the tap position in the third field, e.g. 0.76,0.39",
+                    {"screenshots": shots})
     if ad_opened:
         return fail("an ad panel opened instead of the description; nothing else was tapped", {"screenshots": shots})
     if not confirmed:

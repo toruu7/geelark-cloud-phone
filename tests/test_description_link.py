@@ -105,6 +105,29 @@ class TestDescriptionLink(unittest.TestCase):
         self.assertIn((457, int(0.39 * 1440)), phone.taps)       # the title row on the newer layout
         self.assertNotIn((457, 534), phone.taps)
 
+    def test_third_field_can_set_x_and_y(self):
+        self.assertEqual(gl_bulk._desc_tap({"spec": VIDEO + " | danmartell.com | 0.76,0.39"}), (0.76, 0.39))
+        self.assertEqual(gl_bulk._desc_tap({"spec": VIDEO + " | danmartell.com | 0.39"}), (0.636, 0.39))
+        self.assertEqual(gl_bulk._desc_tap({"spec": VIDEO + " | danmartell.com"}), (0.636, 0.371))
+        for bad in ("0.76,0.39,1", "0.99,0.39", "0.05,0.39", "a,b"):
+            with self.assertRaises(gl_bulk.TaskError, msg=bad):
+                gl_bulk._v_description_link({"spec": VIDEO + " | danmartell.com | " + bad})
+
+    def test_the_tap_lands_at_x_and_y_from_the_spec(self):
+        phone = Phone([AD, [], [], [], SHEET])
+        res = self.run_task(phone, spec=VIDEO + " | danmartell.com | 0.76,0.39")
+        self.assertEqual(res["status"], "success", res)
+        self.assertIn((int(0.76 * 720), int(0.39 * 1440)), phone.taps)
+
+    def test_share_sheet_is_closed_and_nothing_in_it_is_tapped(self):
+        share = [node(text="Share"), node(text="Copy link", clickable=True, bounds=(160, 1180, 300, 1280))]
+        phone = Phone([AD, [], [], [], share])
+        res = self.run_task(phone)
+        self.assertNotEqual(res["status"], "success")
+        self.assertIn("Share sheet", res["message"])
+        self.assertEqual(len(phone.taps), 2)          # skip + the one title-row tap; nothing inside the sheet
+        self.assertTrue(phone.keys)                   # Back was pressed to close it
+
     # --- the safe path
     def test_ad_then_description_then_link(self):
         # ad (twice), then three unreadable reads (ad gone), then the description sheet
