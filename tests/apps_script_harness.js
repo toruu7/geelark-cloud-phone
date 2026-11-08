@@ -182,6 +182,8 @@ function load(options = {}) {
     },
     addPhone(enabled, label, type, id, group = '') { state.sheets.Phones.appendRow([enabled, label, type, id, '', group]); },
     addRoutine(enabled, phone, task, value = '', duration = '') { state.sheets.Routine.appendRow([enabled, phone, task, value, duration, '']); },
+    addPlaybookStep(playbook, task, value = '', duration = '') { state.sheets.Playbooks.appendRow([playbook, task, value, duration, '']); },
+    clearPlaybooks() { const sh = state.sheets.Playbooks; for (let r = 2; r <= sh.getLastRow(); r++) for (let c = 1; c <= 5; c++) sh.set(r, c, ''); },
     clearExamples() {
       ['Phones', 'Routine'].forEach((n) => { const sh = state.sheets[n]; for (let r = 2; r <= sh.getLastRow(); r++) for (let c = 1; c <= 7; c++) sh.set(r, c, ''); });
     },
@@ -205,6 +207,15 @@ function seedTasks() {
     const res = env.ctx.enqueue_({ batch: '2026-11-03', dryRun: true });
     res.plan.forEach((p) => out.push({ task_id: p.task_id, device: p.device, action: p.action, params: p.params, name: lib.name }));
     if (res.problems.length) out.push({ problem: res.problems.join('; '), name: lib.name });
+  });
+  const playbookNames = Array.from(new Set(env.rows('Playbooks').map((r) => String(r.playbook || '').trim()).filter(Boolean)));
+  playbookNames.forEach((name) => {
+    env.clearExamples();
+    env.addPhone(true, 'P1', 'cloud', 'abc123');
+    env.addRoutine(true, 'P1', name, 'https://www.youtube.com/watch?v=Bm84BAtOfQw&t=3', 30);
+    const res = env.ctx.enqueue_({ batch: '2026-11-03', dryRun: true });
+    res.plan.forEach((p) => out.push({ task_id: p.task_id, device: p.device, action: p.action, params: p.params, name: 'playbook: ' + name }));
+    if (res.problems.length) out.push({ problem: res.problems.join('; '), name: 'playbook: ' + name });
   });
   return out;
 }

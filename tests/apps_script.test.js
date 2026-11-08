@@ -23,7 +23,7 @@ const T0 = '2026-11-03T08:00:00Z';   // 08:00 UTC, before the default 09:00 run 
 test('setup creates every tab, seeds the library and settings, installs one trigger', () => {
   const env = load();
   env.setup();
-  for (const n of ['Tasks', 'Reports', 'Runs', 'Routine', 'Phones', 'Library', 'Settings', 'Overview', '_state']) assert.ok(env.sheet(n), n);
+  for (const n of ['Tasks', 'Reports', 'Runs', 'Routine', 'Phones', 'Library', 'Playbooks', 'Settings', 'Overview', '_state']) assert.ok(env.sheet(n), n);
   assert.ok(env.rows('Library').length >= 15);
   deepEqual(env.state.triggers, ['tick']);
   env.setup();                                                    // idempotent
@@ -147,6 +147,97 @@ test('the new spend-cap settings exist with the agreed defaults', () => {
   const d = Object.fromEntries(env.ctx.DEFAULT_SETTINGS.map((x) => [x[0], x[1]]));
   assert.equal(d.max_phone_minutes, '8');
   assert.equal(d.daily_phone_minutes, '120');
+});
+
+
+// ---------------------------------------------------------------- playbooks
+test('setup seeds the Watch and Browse playbooks once and never re-adds them after they are edited', () => {
+  const env = fresh();
+  const names = () => env.rows('Playbooks').map((r) => r.playbook).filter(Boolean);
+  deepEqual(names(), ['Watch routine', 'Browse routine']);
+  env.clearPlaybooks();
+  env.addPlaybookStep('Mine', 'Press Home');
+  env.ctx.setup();
+  assert.ok(names().includes('Mine'));
+  assert.ok(!names().includes('Watch routine'));                      // not re-seeded over somebody's own list
+});
+
+test('a playbook in the Routine expands into its steps, in order, for every enabled phone of a group', () => {
+  const env = fresh();
+  env.clearExamples();
+  env.clearPlaybooks();
+  env.addPhone(true, 'A1', 'cloud', 'id-a1', 'Crew');
+  env.addPhone(true, 'A2', 'cloud', 'id-a2', 'Crew');
+  env.addPhone(false, 'A3', 'cloud', 'id-a3', 'Crew');                 // switched off: skipped quietly
+  env.addPlaybookStep('Daily', 'Open YouTube');
+  env.addPlaybookStep('', 'Watch YouTube video', 'https://youtu.be/xyz', 45);   // blank name = same playbook
+  env.addPlaybookStep('', 'Press Home');
+  env.addRoutine(true, 'Crew', 'Daily');
+  const r = env.ctx.enqueue_({ batch: '2026-11-03', dryRun: true });
+  deepEqual(r.problems, []);
+  deepEqual(r.plan.map((p) => p.task_id), ['2026-11-03-a1-01', '2026-11-03-a1-02', '2026-11-03-a1-03',
+                                           '2026-11-03-a2-01', '2026-11-03-a2-02', '2026-11-03-a2-03']);
+  deepEqual(r.plan.slice(0, 3).map((p) => p.task), ['Open YouTube', 'Watch YouTube video', 'Press Home']);
+  const flow = JSON.parse(r.plan[1].params);
+  assert.equal(flow.steps[1].url, 'https://youtu.be/xyz');
+  assert.equal(flow.steps[3].seconds, 45);
+});
+
+test('a blank step value or duration is supplied by the Routine row that assigns the playbook', () => {
+  const env = fresh();
+  env.clearExamples();
+  env.clearPlaybooks();
+  env.addPhone(true, 'A1', 'cloud', 'id-a1', 'Crew');
+  env.addPlaybookStep('Daily', 'Watch YouTube video');                 // value and duration left for the assignment
+  env.addRoutine(true, 'Crew', 'Daily', 'https://youtu.be/from-routine', 90);
+  const r = env.ctx.enqueue_({ batch: '2026-11-03', dryRun: true });
+  deepEqual(r.problems, []);
+  const flow = JSON.parse(r.plan[0].params);
+  assert.equal(flow.steps[1].url, 'https://youtu.be/from-routine');
+  assert.equal(flow.steps[3].seconds, 90);
+  assert.equal(r.plan[0].value, 'https://youtu.be/from-routine');
+});
+
+test('a playbook step naming an unknown task is one problem that points at its row; the other steps still queue', () => {
+  const env = fresh();
+  env.clearExamples();
+  env.clearPlaybooks();
+  env.addPhone(true, 'A1', 'cloud', 'id-a1');
+  env.addPlaybookStep('Daily', 'Open YouTube');
+  env.addPlaybookStep('', 'Nonexistent task');
+  env.addPlaybookStep('', 'Press Home');
+  env.addRoutine(true, 'A1', 'Daily');
+  const r = env.ctx.enqueue_({ batch: '2026-11-03', dryRun: true });
+  assert.equal(r.problems.length, 1);
+  assert.match(r.problems[0], /playbook "Daily" step 2.*Playbooks row 3.*Nonexistent task/);
+  deepEqual(r.plan.map((p) => p.task), ['Open YouTube', 'Press Home']);
+});
+
+test('the Library wins when a name is both a task and a playbook, and playbooks cannot be nested', () => {
+  const env = fresh();
+  env.clearExamples();
+  env.clearPlaybooks();
+  env.addPhone(true, 'A1', 'cloud', 'id-a1');
+  env.addPlaybookStep('Press Home', 'Open YouTube');                   // same name as a Library task
+  env.addPlaybookStep('Outer', 'Inner');                               // a playbook as a step
+  env.addPlaybookStep('Inner', 'Press Home');
+  env.addRoutine(true, 'A1', 'Press Home');
+  env.addRoutine(true, 'A1', 'Outer');
+  const r = env.ctx.enqueue_({ batch: '2026-11-03', dryRun: true });
+  deepEqual(r.plan.map((p) => p.task), ['Press Home']);                // the Library task, not the playbook
+  assert.equal(r.problems.length, 1);
+  assert.match(r.problems[0], /playbook "Outer" step 1.*"Inner"/);
+});
+
+test('a name that is neither a task nor a playbook is reported as one clear problem', () => {
+  const env = fresh();
+  env.clearExamples();
+  env.clearPlaybooks();
+  env.addPhone(true, 'A1', 'cloud', 'id-a1');
+  env.addRoutine(true, 'A1', 'No such thing');
+  const r = env.ctx.enqueue_({ batch: '2026-11-03', dryRun: true });
+  assert.equal(r.problems.length, 1);
+  assert.match(r.problems[0], /No such thing.*Library.*Playbooks/);
 });
 
 // ---------------------------------------------------------------- enqueue

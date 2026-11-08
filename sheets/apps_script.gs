@@ -20,7 +20,7 @@
  */
 
 var TAB = { TASKS: 'Tasks', REPORTS: 'Reports', RUNS: 'Runs', ROUTINE: 'Routine', PHONES: 'Phones',
-            LIBRARY: 'Library', SETTINGS: 'Settings', DASH: 'Overview', STATE: '_state' };
+            LIBRARY: 'Library', PLAYBOOKS: 'Playbooks', SETTINGS: 'Settings', DASH: 'Overview', STATE: '_state' };
 
 var HEADERS = {
   Tasks: ['task_id', 'device', 'action', 'params', 'status', 'attempts', 'worker', 'claimed_at', 'finished_at', 'result',
@@ -31,6 +31,7 @@ var HEADERS = {
   Routine: ['enabled', 'phone', 'task', 'value', 'duration_s', 'note'],
   Phones: ['enabled', 'label', 'type', 'phone_id', 'device', 'group'],
   Library: ['name', 'action', 'params_template', 'value_hint', 'description'],
+  Playbooks: ['playbook', 'task', 'value', 'duration_s', 'note'],
   Settings: ['setting', 'value', 'help']
 };
 
@@ -325,6 +326,7 @@ function enqueueNow_(body) {
 function enqueue_(opts) {
   var batch = opts.batch;
   var phones = readPhones_();
+  var playbooks = readPlaybooks_();
   var library = {};
   table_(TAB.LIBRARY).rows.forEach(function (r) { if (String(r.name || '').trim()) library[String(r.name).trim()] = r; });
   var routine = table_(TAB.ROUTINE).rows;
@@ -347,17 +349,30 @@ function enqueue_(opts) {
     labels.forEach(function (phoneName) { addRow_(r, phoneName, where, taskName); });
   });
 
+  // A Routine row names a Library task, or a playbook (a named list of Library tasks, expanded into its steps in order).
+  // The Library wins if a name is in both. Playbooks cannot contain playbooks.
   function addRow_(r, phoneName, where, taskName) {
     var phone = phones[phoneName];
     if (!phone.enabled) return;                                // phone switched off: its tasks are skipped quietly
     if (phone.error) { problems.push(where + ': ' + phone.error); return; }
+    if (!library[taskName] && playbooks[taskName]) {
+      playbooks[taskName].forEach(function (st) {
+        addTask_(phoneName, phone, st.task, blank_(st.value) ? r.value : st.value, blank_(st.duration) ? r.duration_s : st.duration,
+                 where + ' > playbook "' + taskName + '" step ' + st.n + ' (Playbooks row ' + st.row + ')');
+      });
+      return;
+    }
+    addTask_(phoneName, phone, taskName, r.value, r.duration_s, where);
+  }
+
+  function addTask_(phoneName, phone, taskName, value, duration, where) {
     var lib = library[taskName];
-    if (!lib) { problems.push(where + ': task "' + taskName + '" is not in the Library tab.'); return; }
+    if (!lib) { problems.push(where + ': task "' + taskName + '" is not in the Library tab (or, for a Routine row, the Playbooks tab).'); return; }
     var action = String(lib.action || '').trim();
     if (ALLOWED_ACTIONS.indexOf(action) < 0) { problems.push(where + ': library action "' + action + '" is not supported.'); return; }
     var params;
     try {
-      params = fillTemplate_(lib.params_template, r.value, r.duration_s);
+      params = fillTemplate_(lib.params_template, value, duration);
       var parsed = JSON.parse(params);
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('params must be a JSON object');
     } catch (err) {
@@ -367,7 +382,7 @@ function enqueue_(opts) {
     counts[phoneName] = (counts[phoneName] || 0) + 1;
     plan.push({ task_id: batch + '-' + slug_(phoneName) + '-' + ('0' + counts[phoneName]).slice(-2), device: phone.device,
                 action: action, params: params, status: 'pending', batch: batch, phone: phoneName, task: taskName,
-                value: r.value === undefined ? '' : String(r.value) });
+                value: blank_(value) ? '' : String(value) });
   }
 
   if (opts.dryRun) return { batch: batch, plan: plan, problems: problems };
@@ -397,6 +412,21 @@ function enqueue_(opts) {
   if (!fresh.length) maybeSendReport_(batch, 'Nothing to run today.');
   safely_(refreshDashboard_);
   return { batch: batch, enqueued: fresh.length, problems: problems };
+}
+
+function blank_(v) { return v === undefined || v === null || String(v).trim() === ''; }
+
+// {playbook name: [{task, value, duration, n, row}]}; a blank playbook cell means "same playbook as the row above".
+function readPlaybooks_() {
+  var map = {}, current = '';
+  table_(TAB.PLAYBOOKS).rows.forEach(function (r) {
+    if (!blank_(r.playbook)) current = String(r.playbook).trim();
+    var task = String(r.task || '').trim();
+    if (!current || !task) return;
+    var steps = (map[current] = map[current] || []);
+    steps.push({ task: task, value: r.value, duration: r.duration_s, n: steps.length + 1, row: r._row });
+  });
+  return map;
 }
 
 function readPhones_() {
@@ -588,6 +618,7 @@ function setup() {
   ensureSheet_(TAB.STATE, []);
   seedSettings_();
   seedLibrary_();
+  seedPlaybooks_();
   seedExamples_();
   applyUi_();
   installTrigger_();
@@ -628,6 +659,26 @@ function seedSettings_() {
   });
 }
 
+// Named lists of steps. One row per step; the playbook name only has to be written on its first row. A step's value and
+// duration may be left blank: the Routine row that assigns the playbook then supplies them.
+var PLAYBOOK_SEED = [
+  ['Watch routine', 'Open YouTube', '', '', 'Replace the link below with your video, or clear it and give the link in the Routine row.'],
+  ['', 'Watch YouTube video', 'https://www.youtube.com/watch?v=Bm84BAtOfQw', '60', ''],
+  ['', 'Take screenshot', '', '', 'proof for the report'],
+  ['', 'Close YouTube', '', '', ''],
+  ['Browse routine', 'Check phone is online', '', '', ''],
+  ['', 'Browse YouTube Shorts (~2 min)', '', '', 'browse only'],
+  ['', 'Take screenshot', '', '', 'proof for the report'],
+  ['', 'Press Home', '', '', ''],
+  ['', 'Close YouTube', '', '', '']
+];
+
+function seedPlaybooks_() {
+  var sh = sheet_(TAB.PLAYBOOKS);
+  if (sh.getLastRow() >= 2) return;                 // never add rows to a playbook list somebody has already edited
+  PLAYBOOK_SEED.forEach(function (row) { sh.appendRow(row); });
+}
+
 function seedLibrary_() {
   var sh = sheet_(TAB.LIBRARY);
   var have = {};
@@ -660,10 +711,23 @@ function applyUi_() {
   var range = function (sh, col) { return sh.getRange(2, col, MAX_ROWS, 1); };
 
   ifMissing(range(routine, 1), rule().requireCheckbox().build());
-  ifMissing(range(routine, 2), rule().requireValueInRange(phones.getRange(2, 2, MAX_ROWS, 1), true).setAllowInvalid(true)
-    .setHelpText('Pick a phone from the Phones tab, or type a group name from the Phones "group" column').build());
-  ifMissing(range(routine, 3), rule().requireValueInRange(lib.getRange(2, 1, MAX_ROWS, 1), true).setAllowInvalid(false)
+  // Helper lists in the hidden _state tab (the script only ever writes _state!A1:B5): every phone and group name, and every
+  // Library task and playbook name. Formulas keep them current as you add phones, groups and playbooks.
+  var stateSheet = sheet_(TAB.STATE);
+  if (!stateSheet.getRange(1, 4).getFormula()) {
+    stateSheet.getRange(1, 4).setFormula('=SORT(UNIQUE(FILTER({Phones!B2:B;Phones!F2:F},{Phones!B2:B;Phones!F2:F}<>"")))');
+  }
+  if (!stateSheet.getRange(1, 6).getFormula()) {
+    stateSheet.getRange(1, 6).setFormula('=SORT(UNIQUE(FILTER({Library!A2:A;Playbooks!A2:A},{Library!A2:A;Playbooks!A2:A}<>"")))');
+  }
+  ifMissing(range(routine, 2), rule().requireValueInRange(stateSheet.getRange(1, 4, 200, 1), true).setAllowInvalid(true)
+    .setHelpText('Pick a phone, or a group name from the Phones tab').build());
+  ifMissing(range(routine, 3), rule().requireValueInRange(stateSheet.getRange(1, 6, 300, 1), true).setAllowInvalid(true)
+    .setHelpText('Pick a task from the Library tab, or a playbook from the Playbooks tab').build());
+  var playbooksSheet = sheet_(TAB.PLAYBOOKS);
+  ifMissing(range(playbooksSheet, 2), rule().requireValueInRange(lib.getRange(2, 1, MAX_ROWS, 1), true).setAllowInvalid(false)
     .setHelpText('Pick a task from the Library tab').build());
+  ifMissing(range(playbooksSheet, 4), strictList(DURATIONS.map(String)));
   ifMissing(range(routine, 5), strictList(DURATIONS.map(String)));
   ifMissing(range(phones, 1), rule().requireCheckbox().build());
   ifMissing(range(phones, 3), strictList(['cloud', 'local']));
