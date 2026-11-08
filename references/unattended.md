@@ -20,9 +20,9 @@ Run `setup()` once from Apps Script (see [bulk_automation.md](bulk_automation.md
 
 | Tab | You | What it is |
 | :--- | :--- | :--- |
-| **Phones** | fill once | One row per phone: tick `enabled`, a `label` you choose ("Phone 4"), `type` (dropdown: cloud / local), `phone_id` (GeeLark profile id). |
+| **Phones** | fill once | One row per phone: tick `enabled`, a `label` you choose ("Phone 4"), `type` (dropdown: cloud / local), `phone_id` (GeeLark profile id), and optionally a `group` (for example "Warmup"). |
 | **Library** | rarely touch | The tasks you can pick: "Open YouTube", "Watch YouTube video", "Skip ad if shown", "Take screenshot", ... Each is an action plus a parameter template. Add your own by picking an action from the dropdown. |
-| **Routine** | the daily plan | One row per step: tick `enabled`, **pick the phone** (dropdown from Phones), **pick the task** (dropdown from Library), then only if the task needs it a `value` (a link or text) and a `duration_s` (dropdown). **Row order is run order**, per phone. |
+| **Routine** | the daily plan | One row per step: tick `enabled`, **pick the phone, or type a group name** (every enabled phone in that group gets the step), **pick the task** (dropdown from Library), then only if the task needs it a `value` (a link or text) and a `duration_s` (dropdown). **Row order is run order**, per phone. |
 | **Settings** | once | `run_time` (dropdown, every 15 min), `enabled`, `paused` (emergency stop), `on_failure`, retries, limits, `report_email`. |
 | **Tasks** | read only | The queue. Each morning's rows are created for you; colours show pending / running / success / failed. |
 | **Reports**, **Runs** | read only | One row per task result plus events (retries, offline, warnings); one summary row per runner pass. |
@@ -41,10 +41,13 @@ A phone takes its next task only when the previous one has finished. Different p
 
 ## 2. Choose where the runner lives
 
-Both options run the same command, `python scripts/geelark.py bulk-run --only-cloud`, which:
+Both options run the same command, `python scripts/geelark.py bulk-run --only-cloud --waves 3`, which:
 * exits silently (writes nothing) when nothing is waiting, so frequent checks are free;
 * reads limits from the Settings tab (a flag on the command line overrides it);
-* never takes tasks without a `cloud:` device, never runs two copies at once on one machine.
+* never takes tasks without a `cloud:` device, never runs two copies at once on one machine;
+* starts at most `max_cloud_phones` phones at a time and, with `--waves N`, starts the next batch when one finishes (20 phones at 10 a time needs `--waves 2` or more);
+* enforces two spend caps from Settings: `max_phone_minutes` (a phone takes no new task after that long) and `daily_phone_minutes` (no new phone or task once the day's total is reached; the total is kept across runs in `logs/.phone_minutes.json`);
+* spaces its GeeLark API calls (default 150 a minute, override with `GEELARK_API_RATE_PER_MIN`; the API's limit is 200).
 
 ### Option A: Linux VPS (recommended: precise timing, simplest to reason about)
 Any small Debian/Ubuntu server.

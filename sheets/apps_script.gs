@@ -29,7 +29,7 @@ var HEADERS = {
             'phone', 'task'],
   Runs: ['run_id', 'started', 'finished', 'workers', 'total', 'success', 'failed', 'other', 'notes'],
   Routine: ['enabled', 'phone', 'task', 'value', 'duration_s', 'note'],
-  Phones: ['enabled', 'label', 'type', 'phone_id', 'device'],
+  Phones: ['enabled', 'label', 'type', 'phone_id', 'device', 'group'],
   Library: ['name', 'action', 'params_template', 'value_hint', 'description'],
   Settings: ['setting', 'value', 'help']
 };
@@ -56,6 +56,8 @@ var DEFAULT_SETTINGS = [
   ['retries', '1', 'Extra attempts for a failed task.'],
   ['max_cloud_phones', '2', 'Most cloud phones started at the same time (each bills per minute).'],
   ['task_timeout_s', '120', 'Seconds one task attempt may take.'],
+  ['max_phone_minutes', '8', 'Spend cap: a cloud phone takes no new task once it has been up this many minutes.'],
+  ['daily_phone_minutes', '120', 'Spend cap: total cloud phone-minutes per day. Once reached, no new phone or task starts.'],
   ['max_runtime_min', '120', 'After this many minutes a run starts no NEW tasks (unfinished ones stay pending).'],
   ['task_delay_s', '2', 'Pause between tasks on the same phone.'],
   ['keep_days', '14', 'How many days of finished tasks stay in the Tasks tab (Reports keep 90 days).'],
@@ -327,15 +329,26 @@ function enqueue_(opts) {
   table_(TAB.LIBRARY).rows.forEach(function (r) { if (String(r.name || '').trim()) library[String(r.name).trim()] = r; });
   var routine = table_(TAB.ROUTINE).rows;
   var plan = [], problems = [], counts = {};
+  var groups = {};                                             // group name -> phone labels, in Phones-tab order
+  Object.keys(phones).forEach(function (label) {
+    var g = phones[label].group;
+    if (g) (groups[g] = groups[g] || []).push(label);
+  });
 
   routine.forEach(function (r) {
-    var phoneName = String(r.phone || '').trim();
+    var targetName = String(r.phone || '').trim();
     var taskName = String(r.task || '').trim();
-    if (!phoneName && !taskName) return;                       // empty row
+    if (!targetName && !taskName) return;                      // empty row
     if (!truthy_(r.enabled)) return;                           // switched off
     var where = 'Routine row ' + r._row;
+    // a row names one phone, or a group: every phone in the group gets the task
+    var labels = phones[targetName] ? [targetName] : groups[targetName];
+    if (!labels) { problems.push(where + ': "' + targetName + '" is not a phone or a group in the Phones tab.'); return; }
+    labels.forEach(function (phoneName) { addRow_(r, phoneName, where, taskName); });
+  });
+
+  function addRow_(r, phoneName, where, taskName) {
     var phone = phones[phoneName];
-    if (!phone) { problems.push(where + ': phone "' + phoneName + '" is not in the Phones tab.'); return; }
     if (!phone.enabled) return;                                // phone switched off: its tasks are skipped quietly
     if (phone.error) { problems.push(where + ': ' + phone.error); return; }
     var lib = library[taskName];
@@ -355,7 +368,7 @@ function enqueue_(opts) {
     plan.push({ task_id: batch + '-' + slug_(phoneName) + '-' + ('0' + counts[phoneName]).slice(-2), device: phone.device,
                 action: action, params: params, status: 'pending', batch: batch, phone: phoneName, task: taskName,
                 value: r.value === undefined ? '' : String(r.value) });
-  });
+  }
 
   if (opts.dryRun) return { batch: batch, plan: plan, problems: problems };
 
@@ -393,7 +406,7 @@ function readPhones_() {
     if (!label) return;
     var type = String(r.type || 'cloud').trim().toLowerCase();
     var id = String(r.phone_id === undefined ? '' : r.phone_id).trim();
-    var p = { enabled: truthy_(r.enabled), device: '', error: '' };
+    var p = { enabled: truthy_(r.enabled), device: '', error: '', group: String(r.group || '').trim() };
     if (type === 'local') {
       if (!/^[A-Za-z0-9_.:\-]+$/.test(id)) p.error = 'phone "' + label + '" needs an ADB serial in phone_id.';
       p.device = id;
@@ -647,8 +660,8 @@ function applyUi_() {
   var range = function (sh, col) { return sh.getRange(2, col, MAX_ROWS, 1); };
 
   ifMissing(range(routine, 1), rule().requireCheckbox().build());
-  ifMissing(range(routine, 2), rule().requireValueInRange(phones.getRange(2, 2, MAX_ROWS, 1), true).setAllowInvalid(false)
-    .setHelpText('Pick a phone from the Phones tab').build());
+  ifMissing(range(routine, 2), rule().requireValueInRange(phones.getRange(2, 2, MAX_ROWS, 1), true).setAllowInvalid(true)
+    .setHelpText('Pick a phone from the Phones tab, or type a group name from the Phones "group" column').build());
   ifMissing(range(routine, 3), rule().requireValueInRange(lib.getRange(2, 1, MAX_ROWS, 1), true).setAllowInvalid(false)
     .setHelpText('Pick a task from the Library tab').build());
   ifMissing(range(routine, 5), strictList(DURATIONS.map(String)));
@@ -669,7 +682,8 @@ function applyUi_() {
   for (var h = 0; h < 24; h++) for (var m = 0; m < 60; m += 15) times.push(('0' + h).slice(-2) + ':' + ('0' + m).slice(-2));
   var lists = {
     run_time: times, on_failure: ['continue', 'stop'], retries: ['0', '1', '2', '3'], max_cloud_phones: ['1', '2', '3', '4', '5', '6', '8', '10'],
-    task_timeout_s: ['60', '120', '180', '300', '600', '900'], max_runtime_min: ['15', '30', '60', '120', '180', '240', '480'],
+    task_timeout_s: ['60', '120', '180', '300', '600', '900'], max_phone_minutes: ['5', '8', '10', '12', '15', '20'],
+    daily_phone_minutes: ['30', '60', '120', '200', '300', '500'], max_runtime_min: ['15', '30', '60', '120', '180', '240', '480'],
     task_delay_s: ['0', '2', '5', '10', '30', '60'], keep_days: ['7', '14', '30', '60', '90']
   };
   table_(TAB.SETTINGS).rows.forEach(function (r) {

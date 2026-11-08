@@ -653,7 +653,8 @@ def load_tasks_file(path):
 # Run settings: explicit CLI flag > sheet Settings tab > built-in default
 # ---------------------------------------------------------------------------
 DEFAULT_SETTINGS = {"retries": 1, "max_workers": 8, "max_cloud_phones": 2, "task_timeout": 120.0,
-                    "task_delay": 0.0, "max_runtime": None, "on_failure": "continue"}
+                    "task_delay": 0.0, "max_runtime": None, "on_failure": "continue",
+                    "max_phone_minutes": 8.0, "daily_phone_minutes": 120.0}
 
 
 def _as_int(v):
@@ -671,6 +672,8 @@ _SHEET_SETTINGS = {
     "task_timeout": ("task_timeout_s", float, 10, 1800),
     "task_delay": ("task_delay_s", float, 0, 600),
     "max_runtime": ("max_runtime_min", _minutes_to_s, 60, 24 * 3600),
+    "max_phone_minutes": ("max_phone_minutes", float, 1, 240),
+    "daily_phone_minutes": ("daily_phone_minutes", float, 1, 10000),
 }
 
 
@@ -707,6 +710,33 @@ def resolve_settings(cli, sheet):
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
+def _day_file(log_dir):
+    return os.path.join(log_dir, ".phone_minutes.json")
+
+
+def daily_used_s(log_dir, today=None):
+    """Cloud phone seconds already used today (by earlier runs and waves in this log directory)."""
+    today = today or datetime.now().date().isoformat()
+    try:
+        with open(_day_file(log_dir), encoding="utf-8") as f:
+            data = json.load(f)
+        return float(data["seconds"]) if data.get("date") == today else 0.0
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0.0
+
+
+def add_daily_used_s(log_dir, seconds, today=None):
+    today = today or datetime.now().date().isoformat()
+    total = daily_used_s(log_dir, today) + max(0.0, seconds)
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        with open(_day_file(log_dir), "w", encoding="utf-8") as f:
+            json.dump({"date": today, "seconds": round(total, 1)}, f)
+    except OSError:
+        pass
+    return total
+
+
 def execute_task(device, task, run_id, retries, task_timeout, shots_dir, reporter):
     """Run one task with retries and report the final outcome. Never raises."""
     started = time.monotonic()
@@ -745,7 +775,8 @@ def execute_task(device, task, run_id, retries, task_timeout, shots_dir, reporte
 def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, max_tasks=None,
              task_timeout=120, task_delay=0.0, dry_run=False, log_dir=None, run_id=None,
              cloud=False, max_cloud_phones=2, cloud_up_timeout=180,
-             only_cloud=False, max_runtime=None, on_failure="continue", probe=False, transport="adb"):
+             only_cloud=False, max_runtime=None, on_failure="continue", probe=False, transport="adb",
+             max_phone_minutes=None, daily_phone_minutes=None):
     """Run tasks in parallel, one worker per phone. `tasks` = local list; otherwise tasks are claimed from `client`'s sheet.
 
     Local ADB phones are addressed by serial. GeeLark cloud phones are addressed as `cloud:<phone_id>`; they are only
@@ -753,7 +784,10 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
 
     Unattended use: `only_cloud=True` ignores local ADB phones and tasks without a `cloud:` device. A sheet run with
     nothing to do returns {"status": "idle"} without writing anything, so polling it every few minutes is free.
-    `max_runtime` (seconds) stops *new* tasks from starting; `on_failure="stop"` skips a phone's remaining tasks after one fails."""
+    `max_runtime` (seconds) stops *new* tasks from starting; `on_failure="stop"` skips a phone's remaining tasks after one fails.
+    Spend caps (minutes, None = off): `max_phone_minutes` stops one cloud phone taking new tasks once it has been up that long;
+    `daily_phone_minutes` stops every phone from taking new work, and new phones from starting, once the day's total
+    (this run plus earlier runs today) reaches it. Tasks left over stay pending."""
     if transport not in ("adb", "api"):
         return {"status": "error", "message": "transport must be 'adb' or 'api'"}
     run_id = run_id or f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
@@ -849,7 +883,38 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
     limit_logged = {"done": False}
     budget = {"left": max_tasks if max_tasks else float("inf"), "total": len(invalid)}
     stop = threading.Event()
-    cloud_state = {"started": set(), "stopped": set(), "billed_s": 0.0, "stop_failures": []}
+    cloud_state = {"started": set(), "stopped": set(), "billed_s": 0.0, "stop_failures": [], "active": {}}
+    phone_cap_s = max_phone_minutes * 60 if max_phone_minutes else None
+    daily_cap_s = daily_phone_minutes * 60 if daily_phone_minutes else None
+    daily_prior_s = daily_used_s(reporter.log_dir) if daily_cap_s else 0.0
+    cap_hit = {"phone": set(), "daily": False}
+
+    def daily_spent_s():
+        with lock:
+            now = time.monotonic()
+            return daily_prior_s + cloud_state["billed_s"] + sum(now - t0 for t0 in cloud_state["active"].values())
+
+    def cap_reached(name, started_at):
+        """Why this cloud phone should stop taking work, or None. Logged once per phone / once per run."""
+        if started_at is None:
+            return None
+        if phone_cap_s and time.monotonic() - started_at > phone_cap_s:
+            with lock:
+                first = name not in cap_hit["phone"]
+                cap_hit["phone"].add(name)
+            if first:
+                reporter.event("warning", f"per-phone cap ({max_phone_minutes:g} min) reached; no new tasks on this phone, "
+                                          "remaining tasks stay pending", name)
+            return "phone"
+        if daily_cap_s and daily_spent_s() >= daily_cap_s:
+            with lock:
+                first = not cap_hit["daily"]
+                cap_hit["daily"] = True
+            if first:
+                reporter.event("warning", f"daily cap ({daily_phone_minutes:g} phone-minutes) reached; no new work or phones "
+                                          "will start, remaining tasks stay pending")
+            return "daily"
+        return None
 
     def reserve():
         with lock:
@@ -886,11 +951,13 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
                 budget["total"] += 1
             return "invalid"
 
-    def work(name, serial, exact):
+    def work(name, serial, exact, started_at=None):
         """Take tasks for phone `name` one at a time and run them over `serial` until none are left."""
         failures = 0
         phone_failed = False
         while not stop.is_set():
+            if cap_reached(name, started_at):
+                return
             if deadline and time.monotonic() > deadline:
                 with lock:
                     first = not limit_logged["done"]
@@ -951,14 +1018,18 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
 
     def cloud_worker(name):
         pid = gl_cloudadb.phone_id(name)
+        if daily_cap_s and daily_spent_s() >= daily_cap_s:      # never start a phone once the day's cap is used up
+            cap_reached(name, time.monotonic())
+            return
         t0 = time.monotonic()
         with lock:
             cloud_state["started"].add(name)  # recorded before `up` so a half-started phone is still stopped
+            cloud_state["active"][name] = t0
         try:
             reporter.event("info", f"starting cloud phone {pid} (billing starts)", name)
             serial = up_fn(pid, reporter.log_dir, cloud_up_timeout)
             reporter.event("info", f"cloud phone {pid} ready as {getattr(serial, 'label', serial)} after {time.monotonic() - t0:.0f}s", name)
-            work(name, serial, True)
+            work(name, serial, True, started_at=t0)
         except gl_cloudadb.CloudError as e:
             reporter.event("error", str(e), name)
         except Exception as e:
@@ -966,6 +1037,7 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
         finally:
             stop_cloud(name)
             with lock:
+                cloud_state["active"].pop(name, None)
                 cloud_state["billed_s"] += time.monotonic() - t0
 
     threads = [threading.Thread(target=work, args=(n, s, False), name=f"bulk-{n}", daemon=True) for n, s in local_workers]
@@ -995,9 +1067,14 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
         reporter.report(t, "skipped", 0, 0, why)
         budget["total"] += 1
 
+    day_total_s = add_daily_used_s(reporter.log_dir, cloud_state["billed_s"]) if (daily_cap_s and cloud_state["billed_s"]) else daily_prior_s
     notes = []
     if interrupted:
         notes.append("interrupted")
+    if cap_hit["daily"]:
+        notes.append("daily phone-minute cap reached")
+    if cap_hit["phone"]:
+        notes.append(f"per-phone cap reached on {len(cap_hit['phone'])} phone(s)")
     if cloud_state["started"]:
         notes.append(f"cloud phones: {len(cloud_state['started'])}, ~{cloud_state['billed_s'] / 60:.1f} phone-minutes")
     if cloud_state["stop_failures"]:
@@ -1009,4 +1086,7 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
             "transport": transport,
             "cloud": {"started": sorted(cloud_state["started"]), "stopped": sorted(cloud_state["stopped"]),
                       "stop_failures": cloud_state["stop_failures"],
-                      "phone_minutes": round(cloud_state["billed_s"] / 60, 1)}}
+                      "phone_minutes": round(cloud_state["billed_s"] / 60, 1)},
+            "caps": {"daily_phone_minutes": daily_phone_minutes, "daily_used_minutes": round(day_total_s / 60, 1),
+                     "max_phone_minutes": max_phone_minutes, "daily_cap_reached": cap_hit["daily"],
+                     "phones_capped": sorted(cap_hit["phone"])}}

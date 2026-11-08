@@ -81,12 +81,55 @@ class keep_awake:
         return False
 
 
+def _more_waves(res, client, tasks, cfg, started, wave, waves):
+    """Another wave is worth starting only if the last one made progress, nothing capped or interrupted it, time is left,
+    and cloud phones still have waiting tasks. Bounded by `waves`, so a phone that never starts cannot loop forever."""
+    if wave + 1 >= waves or tasks is not None or not client:
+        return False
+    if res.get("status") != "success" or res.get("interrupted") or not res.get("cloud", {}).get("started"):
+        return False
+    caps = res.get("caps") or {}
+    if caps.get("daily_cap_reached"):
+        return False
+    if cfg.get("max_runtime") and time.monotonic() - started >= cfg["max_runtime"]:
+        return False
+    try:
+        pending = client.pending_summary()
+    except gl_sheets.SheetsError:
+        return False
+    return any(gl_cloudadb.CLOUD_DEVICE_RE.match(d) for d in pending.get("devices", []))
+
+
+def _merge_waves(results):
+    """One result for a run made of several waves (phones started in batches of max_cloud_phones)."""
+    if len(results) == 1:
+        return results[0]
+    out = dict(results[-1])
+    for key in ("total", "success", "failed", "other"):
+        out[key] = sum(r.get(key, 0) for r in results)
+    out["workers"] = sorted({w for r in results for w in r.get("workers", [])})
+    clouds = [r.get("cloud", {}) for r in results]
+    out["cloud"] = {"started": sorted({d for c in clouds for d in c.get("started", [])}),
+                    "stopped": sorted({d for c in clouds for d in c.get("stopped", [])}),
+                    "stop_failures": [d for c in clouds for d in c.get("stop_failures", [])],
+                    "phone_minutes": round(sum(c.get("phone_minutes", 0) for c in clouds), 1)}
+    out["sheet_write_failures"] = sum(r.get("sheet_write_failures", 0) for r in results)
+    caps = dict(results[-1].get("caps") or {})
+    caps["daily_cap_reached"] = any((r.get("caps") or {}).get("daily_cap_reached") for r in results)
+    caps["phones_capped"] = sorted({p for r in results for p in (r.get("caps") or {}).get("phones_capped", [])})
+    out["caps"] = caps
+    out["waves"] = len(results)
+    out["run_ids"] = [r.get("run_id") for r in results]
+    return out
+
+
 def _bulk_run(args):
     """Returns the process exit code. 0 = finished or idle/paused/busy, 1 = could not run, 4 = tasks failed (--fail-on-error)."""
     client = None if args.no_sheet else gl_sheets.SheetsClient.from_env()
     cli_values = {"retries": args.retries, "max_workers": args.max_workers, "max_cloud_phones": args.max_cloud_phones,
                   "task_timeout": args.task_timeout, "task_delay": args.task_delay, "max_runtime": args.max_runtime,
-                  "on_failure": args.on_failure}
+                  "on_failure": args.on_failure, "max_phone_minutes": getattr(args, "max_phone_minutes", None),
+                  "daily_phone_minutes": getattr(args, "daily_phone_minutes", None)}
     sheet_settings = {}
     if client and not args.tasks:
         sheet_settings = client.settings()
@@ -114,15 +157,25 @@ def _bulk_run(args):
     try:
         _install_term_handler()
         tasks = gl_bulk.load_tasks_file(args.tasks) if args.tasks else None
+        waves = max(1, int(getattr(args, "waves", 1) or 1))
+        transport = getattr(args, "transport", None) or os.environ.get("GEELARK_TRANSPORT", "").strip().lower() or "adb"
         with keep_awake(active=bool(args.cloud) and not args.dry_run):
-            res = gl_bulk.run_bulk(
-            tasks=tasks, client=client,
-            devices=[d.strip() for d in args.devices.split(",") if d.strip()] if args.devices else None,
-            retries=max(0, cfg["retries"]), max_workers=cfg["max_workers"], max_tasks=args.max_tasks,
-            task_timeout=cfg["task_timeout"], task_delay=cfg["task_delay"], dry_run=args.dry_run, log_dir=args.log_dir,
-            cloud=args.cloud, max_cloud_phones=cfg["max_cloud_phones"], cloud_up_timeout=args.cloud_up_timeout,
-            only_cloud=args.only_cloud, max_runtime=cfg["max_runtime"], on_failure=cfg["on_failure"], probe=args.probe,
-            transport=getattr(args, "transport", None) or os.environ.get("GEELARK_TRANSPORT", "").strip().lower() or "adb")
+            results, started = [], time.monotonic()
+            for wave in range(waves):
+                r = gl_bulk.run_bulk(
+                    tasks=tasks, client=client,
+                    devices=[d.strip() for d in args.devices.split(",") if d.strip()] if args.devices else None,
+                    retries=max(0, cfg["retries"]), max_workers=cfg["max_workers"], max_tasks=args.max_tasks,
+                    task_timeout=cfg["task_timeout"], task_delay=cfg["task_delay"], dry_run=args.dry_run, log_dir=args.log_dir,
+                    cloud=args.cloud, max_cloud_phones=cfg["max_cloud_phones"], cloud_up_timeout=args.cloud_up_timeout,
+                    only_cloud=args.only_cloud, max_runtime=cfg["max_runtime"], on_failure=cfg["on_failure"], probe=args.probe,
+                    transport=transport, max_phone_minutes=cfg["max_phone_minutes"], daily_phone_minutes=cfg["daily_phone_minutes"])
+                if wave > 0 and r.get("status") == "idle":
+                    break                                  # nothing left for a further wave
+                results.append(r)
+                if not _more_waves(r, client, tasks, cfg, started, wave, waves):
+                    break
+            res = _merge_waves(results)
     finally:
         run_lock.release()
     if ignored:
@@ -342,6 +395,9 @@ def main():
     p_bulk.add_argument("--task-timeout", type=float, default=None, help="Seconds allowed per task attempt (default: Settings tab, else 120)")
     p_bulk.add_argument("--task-delay", type=float, default=None, help="Pause between tasks on the same phone (default: Settings tab, else 0)")
     p_bulk.add_argument("--max-runtime", type=float, default=None, help="Seconds after which no NEW task starts (default: Settings tab, else unlimited)")
+    p_bulk.add_argument("--max-phone-minutes", type=float, default=None, help="Per-phone cap: a cloud phone takes no new task after this many minutes up (default: Settings tab, else 8)")
+    p_bulk.add_argument("--daily-phone-minutes", type=float, default=None, help="Daily cap on total cloud phone-minutes across runs; no new phone or task starts once reached (default: Settings tab, else 120)")
+    p_bulk.add_argument("--waves", type=int, default=1, help="Run up to N waves in one command: after a wave ends, start the next batch of waiting phones (needed when more phones have work than --max-cloud-phones). Default 1")
     p_bulk.add_argument("--on-failure", choices=["continue", "stop"], default=None, help="After a task fails: keep going, or skip that phone's remaining tasks (default: Settings tab, else continue)")
     p_bulk.add_argument("--probe", action="store_true", help="Only check the sheet: prints status work|idle|paused and starts nothing (lets a scheduler skip installing ADB when there is no work)")
     p_bulk.add_argument("--transport", choices=["adb", "api"], default=None, help="How cloud phones are driven: adb (ADB over TCP, default) or api (GeeLark HTTPS API only; no ADB, works behind a web proxy). Default: $GEELARK_TRANSPORT or adb")

@@ -25,8 +25,8 @@ The plan (which phones, which tasks, in what order, limits, pause switch) lives 
    Read the `status` field: `idle` or `paused` or `busy` means report that and finish (do not start anything). `work` means continue. `error` means report the `message` and finish.
 
 3. **Run the plan once.**
-   `python3 scripts/geelark.py bulk-run --only-cloud`
-   It prints JSON. Note `total`, `success`, `failed`, `other`, `cloud.started`, `cloud.stopped`, `cloud.stop_failures`, `cloud.phone_minutes` and `log`. Per-task detail is already in the sheet (Reports tab); do not try to re-create it.
+   `python3 scripts/geelark.py bulk-run --only-cloud --waves 3`
+   This one command runs the whole day: if more phones have work than `max_cloud_phones`, it starts the next batch itself when a batch finishes (up to 3 waves), and it enforces the spend caps from the sheet (per-phone minutes and daily phone-minutes). Never run it a second time. It prints JSON. Note `total`, `success`, `failed`, `other`, `waves`, `cloud.started`, `cloud.stopped`, `cloud.stop_failures`, `cloud.phone_minutes`, `caps` (`daily_cap_reached`, `phones_capped`) and `log`. If a cap was reached, say so in the report: remaining tasks stay pending and expire at the end of the day. Per-task detail is already in the sheet (Reports tab); do not try to re-create it.
 
 4. **If tasks failed** (`failed` or `other` above zero): you may investigate **once per affected phone, for at most 5 minutes**, using the `geelark-cloud-adb` skill (`.claude/skills/geelark-cloud-adb`):
    `python3 .claude/skills/geelark-cloud-adb/scripts/geelark_adb.py up --id <phone id>`, then `shot`, `ui`, `focus` to see what blocked the task, then `down`.

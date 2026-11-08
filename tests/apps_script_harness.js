@@ -180,10 +180,10 @@ function load(options = {}) {
       for (let r = 2; r <= sh.getLastRow(); r++) if (sh.get(r, 1) === key) { sh.set(r, 2, value); return; }
       sh.appendRow([key, value, '']);
     },
-    addPhone(enabled, label, type, id) { state.sheets.Phones.appendRow([enabled, label, type, id, '']); },
+    addPhone(enabled, label, type, id, group = '') { state.sheets.Phones.appendRow([enabled, label, type, id, '', group]); },
     addRoutine(enabled, phone, task, value = '', duration = '') { state.sheets.Routine.appendRow([enabled, phone, task, value, duration, '']); },
     clearExamples() {
-      ['Phones', 'Routine'].forEach((n) => { const sh = state.sheets[n]; for (let r = 2; r <= sh.getLastRow(); r++) for (let c = 1; c <= 6; c++) sh.set(r, c, ''); });
+      ['Phones', 'Routine'].forEach((n) => { const sh = state.sheets[n]; for (let r = 2; r <= sh.getLastRow(); r++) for (let c = 1; c <= 7; c++) sh.set(r, c, ''); });
     },
   };
   return api;

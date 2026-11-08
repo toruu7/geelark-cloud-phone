@@ -28,7 +28,7 @@ test('setup creates every tab, seeds the library and settings, installs one trig
   deepEqual(env.state.triggers, ['tick']);
   env.setup();                                                    // idempotent
   deepEqual(env.state.triggers, ['tick']);
-  assert.equal(env.rows('Settings').length, 12);
+  assert.equal(env.rows('Settings').length, 14);
   const names = env.rows('Library').map((r) => r.name);
   assert.equal(new Set(names).size, names.length);
 });
@@ -51,7 +51,7 @@ test('setup applies dropdowns, checkboxes and status colours', () => {
   assert.ok(env.sheet('Tasks').cfRules.length >= 8);
   assert.ok(env.sheet('Reports').cfRules.length >= 8);
   const rule = env.sheet('Routine').validations['2,2'];
-  deepEqual(rule.setAllowInvalid, [false]);                    // a typo can't get in
+  deepEqual(rule.setAllowInvalid, [true]);                     // a group name from Phones can be typed; enqueue reports any unknown name
 });
 
 test('setup upgrades an older Tasks layout without losing rows', () => {
@@ -109,6 +109,44 @@ test('every seeded library task resolves to valid JSON and an allowed action', (
     assert.ok(env.ctx.ALLOWED_ACTIONS.includes(r.plan[0].action), lib.name);
     assert.equal(typeof JSON.parse(r.plan[0].params), 'object');
   }
+});
+
+
+// ---------------------------------------------------------------- groups
+test('a Routine row can name a group: every enabled phone in it gets the task, in order', () => {
+  const env = fresh();
+  env.clearExamples();
+  env.addPhone(true, 'A1', 'cloud', 'id-a1', 'Warmup');
+  env.addPhone(true, 'A2', 'cloud', 'id-a2', 'Warmup');
+  env.addPhone(false, 'A3', 'cloud', 'id-a3', 'Warmup');          // switched off: skipped quietly
+  env.addPhone(true, 'B1', 'cloud', 'id-b1', 'Other');
+  env.addRoutine(true, 'Warmup', 'Open YouTube');
+  env.addRoutine(true, 'Warmup', 'Press Home');
+  env.addRoutine(true, 'B1', 'Take screenshot');                    // a single phone still works
+  const r = env.ctx.enqueue_({ batch: '2026-11-03', dryRun: true });
+  deepEqual(r.problems, []);
+  deepEqual(r.plan.map((p) => p.task_id), ['2026-11-03-a1-01', '2026-11-03-a2-01', '2026-11-03-a1-02', '2026-11-03-a2-02', '2026-11-03-b1-01']);
+  deepEqual(r.plan.map((p) => p.device), ['cloud:id-a1', 'cloud:id-a2', 'cloud:id-a1', 'cloud:id-a2', 'cloud:id-b1']);
+});
+
+test('a name that is neither a phone nor a group is one clear problem; a phone label beats a group of the same name', () => {
+  const env = fresh();
+  env.clearExamples();
+  env.addPhone(true, 'Solo', 'cloud', 'id-solo', 'Solo');
+  env.addPhone(true, 'M1', 'cloud', 'id-m1', 'Solo');             // a group named like a phone: the phone wins
+  env.addRoutine(true, 'Nobody', 'Open YouTube');
+  env.addRoutine(true, 'Solo', 'Open YouTube');
+  const r = env.ctx.enqueue_({ batch: '2026-11-03', dryRun: true });
+  assert.equal(r.problems.length, 1);
+  assert.match(r.problems[0], /Nobody.*not a phone or a group/);
+  deepEqual(r.plan.map((p) => p.device), ['cloud:id-solo']);
+});
+
+test('the new spend-cap settings exist with the agreed defaults', () => {
+  const env = fresh();
+  const d = Object.fromEntries(env.ctx.DEFAULT_SETTINGS.map((x) => [x[0], x[1]]));
+  assert.equal(d.max_phone_minutes, '8');
+  assert.equal(d.daily_phone_minutes, '120');
 });
 
 // ---------------------------------------------------------------- enqueue

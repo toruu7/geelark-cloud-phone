@@ -1,5 +1,7 @@
 """GeeLark Cloud OpenAPI client and device-readiness resolver."""
+import collections
 import os
+import threading
 import time
 import json
 import subprocess
@@ -13,6 +15,32 @@ import gl_win32
 RE_CLOUD_ENDPOINT = re.compile(r"^/open/[A-Za-z0-9_\-/]+$")
 
 CLOUD_RETRY_STATUSES = {429, 500, 502, 503, 504}
+
+# GeeLark allows 200 requests a minute per API. Every thread of a bulk run shares one sliding window, so 10 phones
+# working at once are spread out instead of being refused. GEELARK_API_RATE_PER_MIN overrides the default.
+DEFAULT_RATE_PER_MIN = 150
+_rate_lock = threading.Lock()
+_call_times = collections.deque()
+
+
+def _throttle(now=time.monotonic, sleep=time.sleep):
+    try:
+        limit = int(os.environ.get("GEELARK_API_RATE_PER_MIN", DEFAULT_RATE_PER_MIN))
+    except ValueError:
+        limit = DEFAULT_RATE_PER_MIN
+    if limit <= 0:
+        return
+    while True:
+        with _rate_lock:
+            t = now()
+            while _call_times and t - _call_times[0] >= 60:
+                _call_times.popleft()
+            if len(_call_times) < limit:
+                _call_times.append(t)
+                return
+            wait = 60 - (t - _call_times[0])
+        sleep(max(0.05, wait))
+
 
 def cloud_api_request(endpoint, payload=None, api_token=None, retries=2, timeout=15):
     """Hybrid Cloud OpenAPI client for https://openapi.geelark.com.
@@ -38,6 +66,7 @@ def cloud_api_request(endpoint, payload=None, api_token=None, retries=2, timeout
     body_bytes = json.dumps(payload or {}).encode("utf-8")
     last_error = None
     for attempt in range(retries + 1):
+        _throttle()
         req = urllib.request.Request(
             url,
             data=body_bytes,
