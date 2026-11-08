@@ -88,6 +88,23 @@ class TestDescriptionLink(unittest.TestCase):
     def test_spec_is_split_on_the_bar(self):
         self.assertEqual(gl_bulk._desc_link_args({"spec": VIDEO + " | danmartell.com"}), (VIDEO, "danmartell.com"))
 
+    def test_third_field_of_the_spec_sets_the_tap_height(self):
+        self.assertEqual(gl_bulk._desc_link_args({"spec": VIDEO + " | danmartell.com | 0.39"}), (VIDEO, "danmartell.com"))
+        self.assertEqual(gl_bulk._desc_row_y({"spec": VIDEO + " | danmartell.com | 0.39"}), 0.39)
+        self.assertEqual(gl_bulk._desc_row_y({"spec": VIDEO + " | danmartell.com"}), 0.371)       # default unchanged
+        self.assertEqual(gl_bulk._desc_row_y({"more_y": 0.4}), 0.4)
+        gl_bulk._v_description_link({"spec": VIDEO + " | danmartell.com | 0.39"})
+        for bad in ("abc", "0.9", "0.1"):
+            with self.assertRaises(gl_bulk.TaskError, msg=bad):
+                gl_bulk._v_description_link({"spec": VIDEO + " | danmartell.com | " + bad})
+
+    def test_the_tap_lands_at_the_height_from_the_spec(self):
+        phone = Phone([AD, [], [], [], SHEET])
+        res = self.run_task(phone, spec=VIDEO + " | danmartell.com | 0.39")
+        self.assertEqual(res["status"], "success", res)
+        self.assertIn((457, int(0.39 * 1440)), phone.taps)       # the title row on the newer layout
+        self.assertNotIn((457, 534), phone.taps)
+
     # --- the safe path
     def test_ad_then_description_then_link(self):
         # ad (twice), then three unreadable reads (ad gone), then the description sheet

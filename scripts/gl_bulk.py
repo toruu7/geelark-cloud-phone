@@ -315,9 +315,25 @@ SKIP_LABELS = ("skip ad", "skip ads", "skip")
 def _desc_link_args(p):
     url, text = p.get("url"), p.get("link_text")
     if p.get("spec") and not (url and text):
-        left, _, right = str(p["spec"]).partition("|")   # "video link | link text" (one value cell in the sheet)
-        url, text = left.strip(), right.strip()
+        parts = [x.strip() for x in str(p["spec"]).split("|")]   # "video link | link text [| tap height]" (one sheet cell)
+        url, text = parts[0], (parts[1] if len(parts) > 1 else "")
     return url, (str(text).strip() if text else text)
+
+
+def _desc_row_y(p):
+    """Where to tap the title row, as a fraction of the screen height. YouTube versions differ: the title row sits at about
+    0.37 on most phones but lower on newer layouts. An optional third field of `spec` sets it for one run
+    (`video link | link text | 0.39`); otherwise the `more_y` param, else 0.371."""
+    parts = [x.strip() for x in str(p.get("spec") or "").split("|")]
+    if len(parts) > 2 and parts[2]:
+        try:
+            y = float(parts[2])
+        except ValueError:
+            raise TaskError("the third field of the value (tap height) must be a number such as 0.39")
+        if not (0.2 <= y <= 0.6):
+            raise TaskError("the tap height must be between 0.2 and 0.6 of the screen height")
+        return y
+    return _num(p, "more_y", 0, 1, 0.371)
 
 
 def _v_description_link(p):
@@ -329,7 +345,7 @@ def _v_description_link(p):
     _num(p, "ad_wait_s", 20, 180, 90)
     _num(p, "settle_s", 3, 30, 12)
     _num(p, "more_x", 0, 1, 0.636)
-    _num(p, "more_y", 0, 1, 0.371)
+    _desc_row_y(p)
 
 
 def _label(node):
@@ -404,7 +420,7 @@ def _r_description_link(ctx, p):
         return fail(f"YouTube is not in the foreground ({fg or 'unknown'}); nothing was tapped", {"screenshots": shots})
 
     # 3) one tap on the title row opens the description
-    if not ctx.tap_normalized(_num(p, "more_x", 0, 1, 0.636), _num(p, "more_y", 0, 1, 0.371)):
+    if not ctx.tap_normalized(_num(p, "more_x", 0, 1, 0.636), _desc_row_y(p)):
         return fail("could not tap the description row")
     ctx.wait(3)
 
