@@ -437,6 +437,7 @@ def main():
     p_bchk = subparsers.add_parser("bulk-check", help="Check ADB devices and the Google Sheet connection")
     p_bstop = subparsers.add_parser("bulk-cloud-stop", help="Stop cloud phones a killed/interrupted bulk run left running (stops billing)")
     p_bstop.add_argument("--log-dir", help="Directory holding the cloud registry (default: ./logs)")
+    p_bstop.add_argument("--force", action="store_true", help="Stop the phones even while a bulk-run is in progress on this machine (cuts its tasks off)")
     p_bstop.add_argument("--transport", choices=["adb", "api"], default=None, help="Stop phones via the cloud-adb skill (adb) or the GeeLark API directly (api). Default: $GEELARK_TRANSPORT or adb")
     p_bflush = subparsers.add_parser("bulk-flush", help="Re-send reports that could not reach the sheet earlier")
     p_bflush.add_argument("--log-dir", help="Directory holding the report spool")
@@ -672,8 +673,24 @@ def main():
         elif args.command == "bulk-cloud-stop":
             mode = args.transport or os.environ.get("GEELARK_TRANSPORT", "").strip().lower() or "adb"
             stop = gl_transport.stop_leftovers if mode == "api" else gl_cloudadb.stop_leftovers
-            res = stop(args.log_dir or gl_sheets.DEFAULT_LOG_DIR)
-            res = _book_recovered_costs(res)
+            # A running bulk-run owns its phones and stops them itself. Stopping them from here would cut its tasks off
+            # (they turn "offline") and double-book their cost, so refuse unless --force.
+            run_lock = DeviceLock(path=os.path.join(os.path.dirname(DeviceLock().path), "geelark-bulk-run.lock"), timeout=0)
+            try:
+                run_lock.acquire()
+            except LockTimeout:
+                if not getattr(args, "force", False):
+                    print(json.dumps({"status": "busy", "stopped": [], "failed": [],
+                                      "message": "a bulk-run is in progress on this machine and stops its own phones; "
+                                                 "use --force to stop them anyway (this cuts its tasks off)"}, indent=2))
+                    return
+                run_lock = None
+            try:
+                res = stop(args.log_dir or gl_sheets.DEFAULT_LOG_DIR)
+                res = _book_recovered_costs(res)
+            finally:
+                if run_lock:
+                    run_lock.release()
             print(json.dumps(dict(res, status="error" if res["failed"] else "success"), indent=2))
             if res["failed"]:
                 sys.exit(1)

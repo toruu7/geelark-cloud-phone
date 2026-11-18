@@ -97,7 +97,8 @@ class TestCloudBulk(CloudCase):
         res, sheet = self.run_tasks([self.key("c1", "cloud:abc")], cloud=True)
         self.assertEqual(self.cloud.down_calls, ["abc"])            # a half-started phone still bills
         self.assertTrue(any("could not" in l["message"] or "glogin" in l["message"] for l in sheet.logs if l["level"] == "error"))
-        self.assertEqual([r["status"] for r in sheet.reports], ["skipped"])
+        self.assertEqual([r["status"] for r in sheet.reports], ["failed"])        # reported with the reason, not left pending
+        self.assertIn("could not be started", sheet.reports[0]["message"])
 
     def test_phone_is_stopped_when_a_task_blows_up(self):
         with patch.object(gl_bulk, "execute_task", side_effect=RuntimeError("kaboom")):

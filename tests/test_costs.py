@@ -14,6 +14,7 @@ import gl_cloudadb
 import gl_cli
 import gl_costs
 from test_bulk import FakeSheet
+from test_bulk_cloud import CloudCase
 
 NOW = 1_800_000_000.0
 ISO = gl_costs._iso
@@ -94,6 +95,48 @@ class TestStopSweepBooksCost(unittest.TestCase):
         res = gl_cli._book_recovered_costs({"stopped": ["p1"], "failed": [], "since": {"p1": 1}}, client=sheet)
         self.assertIn("costs_reconciled", res)
         self.assertEqual(sheet.cost_rows[("r1", "p1")]["status"], "recovered")
+
+
+class TestStartFailure(CloudCase):
+    def test_tasks_of_a_phone_that_cannot_start_are_failed_with_the_reason(self):
+        self.cloud.up_error = "start failed: env not found (code 42001)"
+        tasks = [{"task_id": f"t{i}", "device": "cloud:abc", "action": "key", "params": {"name": "home"}} for i in range(3)]
+        res, sheet = self.run_tasks(tasks, cloud=True)
+        by = {r["task_id"]: r for r in sheet.reports}
+        self.assertEqual(sorted(by), ["t0", "t1", "t2"])
+        for r in by.values():
+            self.assertEqual(r["status"], "failed")
+            self.assertIn("could not be started", r["message"])
+            self.assertIn("env not found", r["message"])
+        self.assertEqual(res["failed"], 3)
+
+
+class TestStopSweepGuard(unittest.TestCase):
+    def run_cli(self, *extra):
+        import json
+        import subprocess
+        import tempfile
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GEELARK_SHEETS")}
+        with tempfile.TemporaryDirectory() as d:
+            out = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "geelark.py"), "bulk-cloud-stop", "--log-dir", d] + list(extra),
+                                 capture_output=True, text=True, env=env, timeout=60)
+        return json.loads(out.stdout)
+
+    def test_the_stop_sweep_refuses_while_a_bulk_run_holds_its_lock(self):
+        from gl_lock import DeviceLock
+        lock = DeviceLock(path=os.path.join(os.path.dirname(DeviceLock().path), "geelark-bulk-run.lock"), timeout=0)
+        lock.acquire()
+        try:
+            res = self.run_cli()
+            self.assertEqual(res["status"], "busy")
+            self.assertIn("--force", res["message"])
+            forced = self.run_cli("--force")
+            self.assertEqual(forced["status"], "success")
+        finally:
+            lock.release()
+
+    def test_the_stop_sweep_runs_when_nothing_else_is_running(self):
+        self.assertEqual(self.run_cli()["status"], "success")
 
 
 if __name__ == "__main__":

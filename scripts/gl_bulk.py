@@ -1103,6 +1103,23 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
             if task_delay:
                 time.sleep(task_delay)
 
+    def fail_pending(name, reason):
+        """A phone that cannot be started would otherwise leave its tasks pending forever (and, in a later wave, take another
+        slot to fail again). Report each of its waiting tasks as failed with the reason, so the sheet shows it."""
+        for _ in range(500):
+            try:
+                task = next_local(name, True) if local_mode else next_sheet(name, True)
+            except Exception as e:
+                reporter.event("error", f"could not fail the waiting tasks of {name}: {e}", name)
+                return
+            if task is None:
+                return
+            if task == "invalid":
+                continue
+            with lock:
+                budget["total"] += 1
+            reporter.report(dict(task, device=name), "failed", 0, 0, f"phone could not be started: {reason}"[:300])
+
     def stop_cloud(name, final=False):
         """Stop a cloud phone. The worker's attempt may fail; the final sweep gets a second chance and only then
         is a failure recorded as an error (the phone may still be billing)."""
@@ -1144,6 +1161,7 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
             work(name, serial, True, started_at=t0)
         except gl_cloudadb.CloudError as e:
             reporter.event("error", str(e), name)
+            fail_pending(name, str(e))
         except Exception as e:
             reporter.event("error", f"cloud worker crashed: {type(e).__name__}: {e}", name)
         finally:
