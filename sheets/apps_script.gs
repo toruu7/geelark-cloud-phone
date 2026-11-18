@@ -20,7 +20,7 @@
  */
 
 var TAB = { TASKS: 'Tasks', REPORTS: 'Reports', RUNS: 'Runs', ROUTINE: 'Routine', PHONES: 'Phones',
-            LIBRARY: 'Library', PLAYBOOKS: 'Playbooks', SETTINGS: 'Settings', COSTS: 'Costs', DASH: 'Overview', STATE: '_state' };
+            LIBRARY: 'Library', PLAYBOOKS: 'Playbooks', SETTINGS: 'Settings', COSTS: 'Costs', HANDOFF: 'Handoff', DASH: 'Overview', STATE: '_state' };
 
 var HEADERS = {
   Tasks: ['task_id', 'device', 'action', 'params', 'status', 'attempts', 'worker', 'claimed_at', 'finished_at', 'result',
@@ -33,6 +33,7 @@ var HEADERS = {
   Library: ['name', 'action', 'params_template', 'value_hint', 'description'],
   Playbooks: ['playbook', 'task', 'value', 'duration_s', 'note'],
   Settings: ['setting', 'value', 'help'],
+  Handoff: ['done', 'phone', 'channel', 'video_link', 'what_to_do', 'assigned_to', 'done_at', 'notes'],
   Costs: ['date', 'timestamp', 'run_id', 'device', 'phone_id', 'minutes', 'cost', 'currency', 'started', 'ended', 'status', 'note']
 };
 
