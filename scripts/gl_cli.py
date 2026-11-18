@@ -14,6 +14,7 @@ import gl_base
 import gl_bulk
 import gl_cloud
 import gl_cloudadb
+import gl_costs
 import gl_input
 import gl_manifest
 import gl_ocr
@@ -79,6 +80,22 @@ class keep_awake:
             except Exception:
                 pass
         return False
+
+
+def _book_recovered_costs(res, client=None):
+    """After a stop sweep: book the cost of any phone an abnormal run left billing, and finish stale open cost rows."""
+    try:
+        client = client if client is not None else gl_sheets.SheetsClient.from_env()
+        if client is None:
+            return res
+        cfg, _ = gl_bulk.resolve_settings({}, client.settings())
+        rec = gl_costs.reconcile_costs(client, res.get("since"), cfg.get("cost_per_minute"), cfg.get("currency", "USD"),
+                                       cfg.get("max_phone_minutes"))
+        if rec["closed"] or rec["created"] or rec["skipped"]:
+            res = dict(res, costs_reconciled=rec)
+    except Exception as e:
+        res = dict(res, costs_reconciled={"skipped": f"{type(e).__name__}: {e}"})
+    return res
 
 
 def _more_waves(res, client, tasks, cfg, started, wave, waves):
@@ -656,6 +673,7 @@ def main():
             mode = args.transport or os.environ.get("GEELARK_TRANSPORT", "").strip().lower() or "adb"
             stop = gl_transport.stop_leftovers if mode == "api" else gl_cloudadb.stop_leftovers
             res = stop(args.log_dir or gl_sheets.DEFAULT_LOG_DIR)
+            res = _book_recovered_costs(res)
             print(json.dumps(dict(res, status="error" if res["failed"] else "success"), indent=2))
             if res["failed"]:
                 sys.exit(1)

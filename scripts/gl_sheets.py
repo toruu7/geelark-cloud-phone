@@ -176,14 +176,20 @@ class Reporter:
             self._append(self.log_path, dict(payload, ts=now_iso(), kind="event"))
         self._send("log", payload)
 
-    def cost(self, device, phone_id, minutes, cost_per_minute=None, currency="USD"):
-        """One row per cloud phone per run: how long it was up (billing) and, when a rate is set, the estimated cost."""
+    def cost(self, device, phone_id, minutes, cost_per_minute=None, currency="USD", status="closed", started="", ended="", note=""):
+        """One row per cloud phone per run: how long it was up (billing) and, when a rate is set, the estimated cost.
+        The row is opened (status "open", 0 minutes) the moment the phone starts billing and closed when it stops, so a run that
+        dies leaves an open row that `gl_costs.reconcile_costs` finishes later. Same run_id + phone_id = the same row."""
         payload = {"run_id": self.run_id, "device": device, "phone_id": str(phone_id), "minutes": round(float(minutes), 2),
-                   "cost": round(float(minutes) * cost_per_minute, 4) if cost_per_minute else "", "currency": currency or ""}
+                   "cost": round(float(minutes) * cost_per_minute, 4) if cost_per_minute else "", "currency": currency or "",
+                   "status": status, "started": started, "ended": ended, "note": note}
         with self._lock:
             self._append(self.log_path, dict(payload, ts=now_iso(), kind="cost"))
         self._send("cost", payload)
         return payload
+
+    def cost_open(self, device, phone_id, started, currency="USD"):
+        return self.cost(device, phone_id, 0, None, currency, status="open", started=started)
 
     def summary(self, started, workers, total, notes=""):
         payload = {

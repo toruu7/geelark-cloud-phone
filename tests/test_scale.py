@@ -80,8 +80,10 @@ class TestCaps(CloudCase):
     def test_each_cloud_phone_logs_its_minutes_and_cost(self):
         tasks = [self.key("c1", "cloud:abc")]
         res, sheet = self.run_tasks(tasks, cloud=True, cost_per_minute=0.5, currency="EUR")
-        self.assertEqual(len(sheet.costs), 1)
-        row = sheet.costs[0]
+        self.assertEqual([c["status"] for c in sheet.costs], ["open", "closed"])      # opened at start, closed at stop
+        self.assertEqual(len(sheet.cost_rows), 1)                                     # one row per phone per run
+        row = sheet.costs[-1]
+        self.assertTrue(row["started"] and row["ended"])
         self.assertEqual((row["device"], row["phone_id"], row["currency"]), ("cloud:abc", "abc", "EUR"))
         self.assertGreater(row["minutes"] + 1, 0)
         self.assertAlmostEqual(row["cost"], round(row["minutes"] * 0.5, 4), places=2)
@@ -90,13 +92,14 @@ class TestCaps(CloudCase):
 
     def test_without_a_rate_minutes_are_logged_and_cost_is_blank(self):
         res, sheet = self.run_tasks([self.key("c1", "cloud:abc")], cloud=True)
-        self.assertEqual(sheet.costs[0]["cost"], "")
+        self.assertEqual(sheet.costs[-1]["cost"], "")
         self.assertIsNone(res["cloud"]["estimated_cost"])
 
     def test_a_cost_row_is_written_even_when_the_phone_never_came_up(self):
         self.cloud.up_error = "boom"
         res, sheet = self.run_tasks([self.key("c1", "cloud:abc")], cloud=True, cost_per_minute=1)
-        self.assertEqual(len(sheet.costs), 1)               # it was started (billing may have begun), so it is counted
+        self.assertEqual(len(sheet.cost_rows), 1)           # it was started (billing may have begun), so it is counted
+        self.assertEqual(list(sheet.cost_rows.values())[0]["status"], "closed")
 
     def test_cost_settings_come_from_the_sheet(self):
         cfg, ignored = gl_bulk.resolve_settings({}, {"cost_per_phone_minute": "0.004", "currency": "eur"})

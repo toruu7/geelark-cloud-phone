@@ -131,10 +131,13 @@ def stop_leftovers(log_dir, down_fn=None):
     """Stop every phone a previous, interrupted run left registered. Returns {stopped: [...], failed: [...]}."""
     stopped, failed = [], []
     down = down_fn or cloud_down
-    for pid in list(leftover_phones(log_dir)):
+    left = leftover_phones(log_dir)
+    for pid in list(left):
         try:
             down(pid, log_dir)
             stopped.append(pid)
         except CloudError as e:
             failed.append({"id": pid, "error": str(e)})
-    return {"stopped": stopped, "failed": failed}
+    # when each stopped phone started billing (epoch seconds), so the cost of a killed run can still be booked
+    since = {pid: (left.get(pid) or {}).get("since") for pid in stopped if isinstance(left.get(pid), dict)}
+    return {"stopped": stopped, "failed": failed, "since": since}

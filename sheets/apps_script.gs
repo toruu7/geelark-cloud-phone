@@ -33,7 +33,7 @@ var HEADERS = {
   Library: ['name', 'action', 'params_template', 'value_hint', 'description'],
   Playbooks: ['playbook', 'task', 'value', 'duration_s', 'note'],
   Settings: ['setting', 'value', 'help'],
-  Costs: ['date', 'timestamp', 'run_id', 'device', 'phone_id', 'minutes', 'cost', 'currency']
+  Costs: ['date', 'timestamp', 'run_id', 'device', 'phone_id', 'minutes', 'cost', 'currency', 'started', 'ended', 'status', 'note']
 };
 
 // Must match the runner's actions (scripts/gl_bulk.py ACTIONS); a test keeps the two lists in sync.
@@ -131,6 +131,7 @@ function doPost(e) {
       case 'log':      return out_(log_(body));
       case 'summary':  return out_(summary_(body));
       case 'cost':     return out_(cost_(body));
+      case 'costs_open': return out_(costsOpen_());
       case 'enqueue':  return out_(enqueueNow_(body));
       case 'inspect':  return out_(inspect_());
       default:         return out_({ ok: false, error: 'unknown_action' });
@@ -221,18 +222,47 @@ function log_(body) {
   return { ok: true };
 }
 
-// One row per cloud phone per run: minutes the phone was up (that is what GeeLark bills) and the estimated cost when a
-// rate is set in Settings (cost_per_phone_minute). The date is kept as text so the Overview can sum a day.
+// One row per cloud phone per run: minutes the phone was up (that is what GeeLark bills) and the estimated cost when a rate
+// is set in Settings (cost_per_phone_minute). The runner OPENS the row (status "open", 0 minutes) when the phone starts
+// billing and CLOSES it when the phone stops: same run_id + phone_id = the same row, so a run that dies leaves an open row
+// that the next stop sweep or run books as "recovered" / "estimated" (see scripts/gl_costs.py). A late "open" never reopens a
+// row that is already closed (replayed writes can arrive out of order). The date is kept as text so the Overview can sum a day.
 function cost_(body) {
   var sh = sheet_(TAB.COSTS);
-  var row = sh.getLastRow() + 1;
+  var t = table_(TAB.COSTS);
+  if (t.headers.indexOf('status') < 0) { ensureSheet_(TAB.COSTS, HEADERS.Costs); t = table_(TAB.COSTS); }   // older layout: add the new columns
   var tz = tz_(settingsMap_());
-  sh.getRange(row, 1).setNumberFormat('@');
+  var runId = String(body.run_id || ''), phoneId = String(body.phone_id || '');
+  var status = String(body.status || 'closed');
   var cost = body.cost === '' || body.cost === undefined || body.cost === null ? '' : Number(body.cost);
-  sh.getRange(row, 1, 1, 8).setValues([[Utilities.formatDate(NOW_(), tz, 'yyyy-MM-dd'), NOW_().toISOString(), body.run_id || '',
-    String(body.device || ''), String(body.phone_id || ''), Number(body.minutes) || 0, isNaN(cost) ? '' : cost,
-    String(body.currency || '')]]);
+  var startedMs = body.started ? new Date(body.started).getTime() : NaN;
+  var dayOf = isNaN(startedMs) ? NOW_() : new Date(startedMs);
+  var rec = {
+    date: Utilities.formatDate(dayOf, tz, 'yyyy-MM-dd'), timestamp: NOW_().toISOString(), run_id: runId,
+    device: String(body.device || ''), phone_id: phoneId, minutes: Number(body.minutes) || 0, cost: isNaN(cost) ? '' : cost,
+    currency: String(body.currency || ''), started: String(body.started || ''), ended: String(body.ended || ''),
+    status: status, note: clip_(body.note)
+  };
+  var rowNum = 0;
+  for (var i = 0; i < t.rows.length; i++) {
+    var r = t.rows[i];
+    if (String(r.run_id) === runId && String(r.phone_id) === phoneId) { rowNum = i + 2; var existing = r; break; }
+  }
+  if (rowNum && status === 'open' && String(existing.status) !== 'open') return { ok: true, ignored: 'already ' + existing.status };
+  var vals = t.headers.map(function (h) { return rec[h] === undefined ? '' : rec[h]; });
+  if (!rowNum) rowNum = sh.getLastRow() + 1;
+  sh.getRange(rowNum, 1).setNumberFormat('@');
+  sh.getRange(rowNum, 1, 1, vals.length).setValues([vals]);
   return { ok: true };
+}
+
+// Rows still open (a phone that started billing and never reported its end), for the runner's reconcile step.
+function costsOpen_() {
+  var rows = [];
+  table_(TAB.COSTS).rows.forEach(function (r) {
+    if (String(r.status) === 'open') rows.push({ run_id: String(r.run_id), device: String(r.device), phone_id: String(r.phone_id), started: String(r.started) });
+  });
+  return { ok: true, rows: rows };
 }
 
 function summary_(body) {

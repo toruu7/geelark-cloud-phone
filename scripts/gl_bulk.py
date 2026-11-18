@@ -20,6 +20,7 @@ from datetime import datetime
 import gl_adb
 import gl_base
 import gl_cloudadb
+import gl_costs
 import gl_sheets
 import gl_transport
 
@@ -938,6 +939,13 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
     if leftovers:
         reporter.event("warning", f"cloud phone(s) from an interrupted run may still be billing: {', '.join(leftovers)}. "
                                   "Run `bulk-cloud-stop` to stop them.")
+    if client and not dry_run:        # finish cost rows an earlier run left open (killed, crashed, sandbox lost)
+        try:
+            rec = gl_costs.reconcile_costs(client, None, cost_per_minute, currency, max_phone_minutes)
+            if rec["closed"]:
+                reporter.event("info", f"booked {len(rec['closed'])} cost row(s) an earlier run left open (estimated)")
+        except Exception as e:
+            reporter.event("warning", f"could not reconcile open cost rows: {e}")
 
     # Workers: (claim name, adb serial). Cloud phones get their serial only after they have been started.
     online = [] if only_cloud else (devices or gl_adb.list_devices(use_cache=False))
@@ -1121,9 +1129,14 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
             cap_reached(name, time.monotonic())
             return
         t0 = time.monotonic()
+        started_iso = gl_sheets.now_iso()
         with lock:
             cloud_state["started"].add(name)  # recorded before `up` so a half-started phone is still stopped
             cloud_state["active"][name] = t0
+        try:
+            reporter.cost_open(name, pid, started_iso, currency)      # booked as open now, so a dead run still leaves a trace
+        except Exception as e:
+            reporter.event("warning", f"could not record the cost start: {e}", name)
         try:
             reporter.event("info", f"starting cloud phone {pid} (billing starts)", name)
             serial = up_fn(pid, reporter.log_dir, cloud_up_timeout)
@@ -1141,7 +1154,8 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
                 cloud_state["billed_s"] += up_s
                 cloud_state["per_phone_s"][name] = up_s
             try:
-                reporter.cost(name, pid, up_s / 60, cost_per_minute, currency)
+                reporter.cost(name, pid, up_s / 60, cost_per_minute, currency, status="closed",
+                              started=started_iso, ended=gl_sheets.now_iso())
             except Exception as e:                 # a cost row must never break a run or hide a stopped phone
                 reporter.event("warning", f"could not record the cost: {e}", name)
 

@@ -451,6 +451,31 @@ test('cost rows are logged per phone with a text date, and old ones are trimmed'
   assert.equal(rows[1].cost, '');
 });
 
+test('a cost row is opened at start, closed in place at stop, and a late open never reopens it', () => {
+  const env = fresh();
+  env.post({ action: 'cost', run_id: 'r', device: 'cloud:p1', phone_id: 'p1', minutes: 0, cost: '', currency: 'USD', status: 'open', started: '2026-11-16T05:36:33+00:00' });
+  assert.equal(env.rows('Costs').length, 1);
+  deepEqual(env.post({ action: 'costs_open' }).rows.map((r) => r.phone_id), ['p1']);
+  env.post({ action: 'cost', run_id: 'r', device: 'cloud:p1', phone_id: 'p1', minutes: 7.1, cost: 0.0497, currency: 'USD', status: 'closed', started: '2026-11-16T05:36:33+00:00', ended: '2026-11-16T05:43:39+00:00' });
+  const rows = env.rows('Costs');
+  assert.equal(rows.length, 1);                                    // updated in place, not appended
+  assert.equal(rows[0].status, 'closed');
+  assert.equal(rows[0].minutes, 7.1);
+  assert.equal(rows[0].ended, '2026-11-16T05:43:39+00:00');
+  deepEqual(env.post({ action: 'costs_open' }).rows, []);
+  env.post({ action: 'cost', run_id: 'r', device: 'cloud:p1', phone_id: 'p1', minutes: 0, status: 'open', started: '2026-11-16T05:36:33+00:00' });   // replayed late
+  assert.equal(env.rows('Costs')[0].status, 'closed');
+  env.post({ action: 'cost', run_id: 'r2', device: 'cloud:p1', phone_id: 'p1', minutes: 3, status: 'closed' });                                       // another run: its own row
+  assert.equal(env.rows('Costs').length, 2);
+});
+
+test('the Costs tab of an older layout gains the new columns on the first cost write', () => {
+  const env = fresh();
+  env.post({ action: 'cost', run_id: 'r', device: 'd', phone_id: 'p', minutes: 1, status: 'open', started: '2026-11-16T05:36:33+00:00' });
+  const r = env.rows('Costs')[0];
+  assert.ok('status' in r && 'started' in r && 'ended' in r && 'note' in r);
+});
+
 // ---------------------------------------------------------------- daily report email
 function finishAll(env, outcomes = {}) {
   for (const w of ['cloud:p4id', 'cloud:p5id']) {

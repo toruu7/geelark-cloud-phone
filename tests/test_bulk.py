@@ -72,6 +72,7 @@ class FakeSheet:
     def __init__(self, tasks=None, claim_error=False):
         self.queue = list(tasks or [])
         self.reports, self.logs, self.summaries, self.costs = [], [], [], []
+        self.cost_rows = {}
         self.claim_error = claim_error
         self.lock = threading.Lock()
         self.reject_writes = False
@@ -99,6 +100,13 @@ class FakeSheet:
         if self.reject_writes:
             return {"ok": False, "error": "request_failed"}
         with self.lock:
+            if verb == "costs_open":
+                return {"ok": True, "rows": [dict(c) for c in self.cost_rows.values() if c.get("status") == "open"]}
+            if verb == "cost":                      # same upsert rule as the sheet script
+                key = (payload.get("run_id"), payload.get("phone_id"))
+                old = self.cost_rows.get(key)
+                if not (old and payload.get("status") == "open" and old.get("status") != "open"):
+                    self.cost_rows[key] = dict(payload)
             {"report": self.reports, "log": self.logs, "summary": self.summaries, "cost": self.costs}[verb].append(payload)
         return {"ok": True}
 
