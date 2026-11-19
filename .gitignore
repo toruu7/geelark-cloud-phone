@@ -31,3 +31,6 @@ Desktop.ini
 .smoke_capture.png
 *.tmp
 logs/
+
+# Live identifiers and current state (never commit)
+private/
