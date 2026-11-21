@@ -115,6 +115,7 @@ function load(options = {}) {
   const state = {
     sheets: {}, order: [], props: new Map(), triggers: [], mail: [], alerts: [], tz: options.tz || 'UTC',
     now: new Date(options.now || '2026-11-03T08:00:00Z'),
+    fetches: [], fetchStatus: 200, fetchBody: { type: 'routine_fire', claude_code_session_id: 'session_X1', claude_code_session_url: 'https://claude.ai/code/session_X1' }, fetchThrows: '',
   };
   if (options.secret !== null) state.props.set('SECRET', options.secret || 'test-secret');
 
@@ -149,6 +150,11 @@ function load(options = {}) {
       setProperty: (k, v) => state.props.set(k, String(v)),
       deleteProperty: (k) => state.props.delete(k),
     }) },
+    UrlFetchApp: { fetch: (url, opts) => {
+      state.fetches.push({ url, opts });
+      if (state.fetchThrows) throw new Error(state.fetchThrows);
+      return { getResponseCode: () => state.fetchStatus, getContentText: () => (typeof state.fetchBody === 'string' ? state.fetchBody : JSON.stringify(state.fetchBody)) };
+    } },
     LockService: { getScriptLock: () => ({ waitLock() {}, tryLock: () => true, releaseLock() {} }) },
     ContentService: { MimeType: { JSON: 'json' }, createTextOutput: (s) => ({ getContent: () => s, setMimeType() { return this; } }) },
     Utilities: { formatDate: (d, tz, p) => fmtDate(d, tz, p) },

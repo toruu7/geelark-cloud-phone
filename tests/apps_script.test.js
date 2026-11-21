@@ -567,6 +567,126 @@ test('Manual tab: refuses while paused, and when nothing is ticked', () => {
   assert.equal(taskRows(env).length, 0);
 });
 
+// ---------------------------------------------------------------- start the cloud routine from the sheet
+const GOOD_URL = 'https://api.anthropic.com/v1/claude_code/routines/trig_01ABCdef123/fire';
+const TOKEN = 'sk-ant-oat01-SECRETTOKEN';
+function configureFire(env, url = GOOD_URL) {
+  env.state.props.set('RUN_URL', url);
+  env.state.props.set('RUN_TOKEN', TOKEN);
+}
+
+test('start routine: refuses when not configured, and when the URL is not Anthropic\'s fire address (token never sent)', () => {
+  const env = fresh();
+  assert.equal(env.call('fireRoutine_').error, 'not_configured');
+  configureFire(env, 'https://evil.example.com/v1/claude_code/routines/trig_1/fire');
+  assert.equal(env.call('fireRoutine_').error, 'bad_url');
+  configureFire(env, 'http://api.anthropic.com/v1/claude_code/routines/trig_1/fire');
+  assert.equal(env.call('fireRoutine_').error, 'bad_url');
+  assert.equal(env.state.fetches.length, 0);                                  // nothing was ever sent
+});
+
+test('start routine: sends the right request, records the session, never writes the token to the sheet', () => {
+  const env = fresh();
+  configureFire(env);
+  const res = env.call('fireRoutine_');
+  assert.equal(res.ok, true);
+  assert.equal(res.session_url, 'https://claude.ai/code/session_X1');
+  assert.equal(env.state.fetches.length, 1);
+  const f = env.state.fetches[0];
+  assert.equal(f.url, GOOD_URL);
+  assert.equal(f.opts.method, 'post');
+  assert.equal(f.opts.headers.Authorization, 'Bearer ' + TOKEN);
+  assert.equal(f.opts.headers['anthropic-version'], '2023-06-01');
+  assert.match(f.opts.headers['anthropic-beta'], /^experimental-cc-routine-/);
+  const report = env.rows('Reports').at(-1);
+  assert.equal(report.action, 'run-now');
+  assert.match(report.message, /session_X1/);
+  const everything = JSON.stringify(Object.keys(env.state.sheets).map((n) => env.state.sheets[n].rowsAsObjects()));
+  assert.ok(!everything.includes('SECRETTOKEN'));                              // the token is in the script properties only
+});
+
+test('start routine: a second start inside the cool-down is refused, then allowed after it', () => {
+  const env = fresh();
+  configureFire(env);
+  assert.equal(env.call('fireRoutine_').ok, true);
+  env.setNow('2026-11-03T08:05:00Z');
+  const again = env.call('fireRoutine_');
+  assert.equal(again.error, 'cooldown');
+  assert.ok(again.wait_min >= 9 && again.wait_min <= 10);
+  assert.equal(env.state.fetches.length, 1);
+  env.setNow('2026-11-03T08:16:00Z');
+  assert.equal(env.call('fireRoutine_').ok, true);
+  assert.equal(env.state.fetches.length, 2);
+});
+
+test('start routine: API errors are reported without the token, and do not start the cool-down', () => {
+  const env = fresh();
+  configureFire(env);
+  env.state.fetchStatus = 400;
+  env.state.fetchBody = { type: 'error', error: { type: 'invalid_request_error', message: 'routine is paused ' + TOKEN } };
+  const res = env.call('fireRoutine_');
+  assert.equal(res.error, 'http_400');
+  assert.ok(!res.detail.includes('SECRETTOKEN'));
+  assert.equal(env.state.props.has('LAST_FIRE_MS'), false);                    // a failed start can be retried at once
+  env.state.fetchStatus = 200;
+  env.state.fetchBody = { claude_code_session_url: 'https://claude.ai/code/session_Y' };
+  assert.equal(env.call('fireRoutine_').ok, true);
+  env.setNow('2026-11-03T09:00:00Z');
+  env.state.fetchThrows = 'DNS failure for ' + TOKEN;
+  const boom = env.call('fireRoutine_');
+  assert.equal(boom.error, 'request_failed');
+  assert.ok(!boom.detail.includes('SECRETTOKEN'));
+});
+
+test('queue and start: queues only the ticked rows as their own batch, then fires once', () => {
+  const env = fresh();
+  configureFire(env);
+  env.addRoutine(true, 'Phone 5', 'Check phone is online');
+  env.post({ action: 'enqueue', force: true });                                // another pending task that must be held back
+  const other = taskRows(env)[0].task_id;
+  manualRow(env, true, 'Phone 4', 'Check phone is online');
+  const res = env.call('queueAndRun_');
+  assert.equal(res.ok, true);
+  assert.equal(res.stage, 'started');
+  assert.equal(res.queued, 1);
+  assert.equal(env.state.fetches.length, 1);
+  assert.equal(taskRows(env).find((r) => r.task_id === other).status, 'expired');
+  assert.equal(taskRows(env).filter((r) => r.batch === res.batch).length, 1);
+});
+
+test('queue and start: nothing is queued unless the trigger is ready, and nothing fires when nothing is queued', () => {
+  const env = fresh();
+  manualRow(env, true, 'Phone 4', 'Check phone is online');
+  const notReady = env.call('queueAndRun_');
+  assert.equal(notReady.stage, 'fire');
+  assert.equal(taskRows(env).length, 0);                                       // not configured: the rows were NOT queued
+  assert.equal(String(env.rows('Manual')[0].queue).toLowerCase(), 'true');
+  configureFire(env);
+  env.sheet('Manual').set(2, 1, false);                                        // untick
+  const none = env.call('queueAndRun_');
+  assert.equal(none.error, 'no_rows_ticked');
+  assert.equal(env.state.fetches.length, 0);
+  env.sheet('Manual').set(2, 1, true);
+  env.setSetting('paused', true);
+  assert.equal(env.call('queueAndRun_').error, 'paused');
+  assert.equal(env.state.fetches.length, 0);
+  assert.equal(taskRows(env).length, 0);
+});
+
+test('queue and start: if the start fails after queueing, the tasks stay queued and the result says so', () => {
+  const env = fresh();
+  configureFire(env);
+  env.state.fetchStatus = 400;
+  env.state.fetchBody = { type: 'error', error: { type: 'invalid_request_error', message: 'paused' } };
+  manualRow(env, true, 'Phone 4', 'Check phone is online');
+  const res = env.call('queueAndRun_');
+  assert.equal(res.ok, false);
+  assert.equal(res.stage, 'fire');
+  assert.equal(res.queued, 1);
+  assert.equal(taskRows(env).length, 1);                                       // queued and waiting for a manual start
+  assert.match(env.ctx.fireProblemText_(res.fire), /paused or disabled/);
+});
+
 // ---------------------------------------------------------------- daily report email
 function finishAll(env, outcomes = {}) {
   for (const w of ['cloud:p4id', 'cloud:p5id']) {

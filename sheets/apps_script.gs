@@ -853,6 +853,7 @@ function onOpen() {
   SpreadsheetApp.getUi().createMenu('GeeLark')
     .addItem('Preview what the routine will queue', 'menuPreview')
     .addItem('Queue ticked rows on the Manual tab', 'menuQueueManual')
+    .addItem('Queue ticked rows AND start the cloud routine', 'menuQueueAndRun')
     .addItem('Run the routine now (queue a manual batch)', 'menuRunNow')
     .addItem('Refresh overview status', 'menuRefresh')
     .addItem('Install / repair setup', 'setup')
@@ -928,6 +929,120 @@ function menuQueueManual() {
   ui.alert(res.ok ? 'Queued ' + res.result.enqueued + ' task(s) as batch ' + res.result.batch +
                     '.\n\nNothing starts until the runner runs: use "Run now" on the cloud routine, or wait for its next scheduled run.\nCloud phones bill per minute.'
                   : 'Not queued: ' + res.error);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Start the cloud routine from the sheet (the routine's API trigger)
+// ---------------------------------------------------------------------------------------------------------------
+// One-time setup (owner): claude.ai/code/routines > the routine > add an API trigger, then paste its URL and token into
+// Project Settings > Script properties as RUN_URL and RUN_TOKEN. The token can only start that one routine. It is only ever
+// sent to Anthropic's fire address (checked below), is never written to a sheet or a message, and a second start within
+// FIRE_COOLDOWN_MIN minutes is refused because the trigger has no duplicate protection (a repeat would start a second session).
+// A paused or disabled routine cannot be fired (the API answers 400): enable it first.
+var FIRE_URL_RE = /^https:\/\/api\.anthropic\.com\/v1\/claude_code\/routines\/trig_[A-Za-z0-9]+\/fire$/;
+var FIRE_COOLDOWN_MIN = 15;
+
+// null when the trigger can be fired now, else {ok:false, error, ...}. Runs BEFORE anything is queued.
+function fireCheck_() {
+  var props = PropertiesService.getScriptProperties();
+  var url = String(props.getProperty('RUN_URL') || '').trim();
+  var token = String(props.getProperty('RUN_TOKEN') || '').trim();
+  if (!url || !token) return { ok: false, error: 'not_configured' };
+  if (!FIRE_URL_RE.test(url)) return { ok: false, error: 'bad_url' };
+  var last = Number(props.getProperty('LAST_FIRE_MS') || 0);
+  var wait = FIRE_COOLDOWN_MIN - (NOW_().getTime() - last) / 60000;
+  if (last && wait > 0) return { ok: false, error: 'cooldown', wait_min: Math.ceil(wait), session_url: props.getProperty('LAST_FIRE_URL') || '' };
+  return null;
+}
+
+function fireRoutine_() {
+  var bad = fireCheck_();
+  if (bad) return bad;
+  var props = PropertiesService.getScriptProperties();
+  var url = String(props.getProperty('RUN_URL')).trim();
+  var token = String(props.getProperty('RUN_TOKEN')).trim();
+  var resp;
+  try {
+    resp = UrlFetchApp.fetch(url, {
+      method: 'post', contentType: 'application/json', payload: '{}', muteHttpExceptions: true,
+      headers: { Authorization: 'Bearer ' + token, 'anthropic-version': '2023-06-01', 'anthropic-beta': 'experimental-cc-routine-2026-04-01' }
+    });
+  } catch (err) {
+    return { ok: false, error: 'request_failed', detail: clip_(String(err && err.message || err).split(token).join('***')) };
+  }
+  var code = resp.getResponseCode();
+  var body = {};
+  try { body = JSON.parse(resp.getContentText()); } catch (e) { /* not JSON */ }
+  if (code === 200 && body && body.claude_code_session_url) {
+    props.setProperty('LAST_FIRE_MS', String(NOW_().getTime()));
+    props.setProperty('LAST_FIRE_URL', String(body.claude_code_session_url));
+    appendObj_(TAB.REPORTS, { timestamp: NOW_().toISOString(), device: '', action: 'run-now', status: 'info',
+      message: 'Cloud routine started from the sheet: ' + body.claude_code_session_url });
+    return { ok: true, session_url: String(body.claude_code_session_url) };
+  }
+  var detail = body && body.error && body.error.message ? clip_(String(body.error.message).split(token).join('***')) : '';
+  return { ok: false, error: 'http_' + code, detail: detail };
+}
+
+// Queue the ticked Manual rows as "run only these", then start the routine. Nothing is queued unless the trigger is ready.
+function queueAndRun_() {
+  var bad = fireCheck_();
+  if (bad) return { ok: false, stage: 'fire', fire: bad };
+  var q = queueManual_({ holdOthers: true });
+  if (!q.ok) return { ok: false, stage: 'queue', error: q.error };
+  if (!q.result.enqueued) return { ok: false, stage: 'queue', error: 'nothing_queued', problems: q.result.problems };
+  var f = fireRoutine_();
+  return { ok: f.ok, stage: f.ok ? 'started' : 'fire', queued: q.result.enqueued, batch: q.result.batch, problems: q.result.problems, fire: f };
+}
+
+function fireProblemText_(f) {
+  switch (f.error) {
+    case 'not_configured': return 'The routine trigger is not set up yet.\n\n1. Open https://claude.ai/code/routines and the routine.\n2. Add an API trigger and copy its URL and token (the token is shown once).\n3. In this sheet: Extensions > Apps Script > Project Settings > Script properties: add RUN_URL and RUN_TOKEN.';
+    case 'bad_url': return 'RUN_URL is not a routine fire address (https://api.anthropic.com/v1/claude_code/routines/trig_.../fire). The token was not sent anywhere.';
+    case 'cooldown': return 'The routine was started ' + (FIRE_COOLDOWN_MIN - f.wait_min) + ' minute(s) ago. A second start would create a second session, so try again in ' + f.wait_min + ' minute(s).' + (f.session_url ? '\nCurrent run: ' + f.session_url : '');
+    case 'http_400': return 'Anthropic refused the start (400). The most likely reason is that the routine is paused or disabled: enable it at https://claude.ai/code/routines.' + (f.detail ? '\n' + f.detail : '');
+    case 'http_401': return 'The token was rejected (401). Generate a new token on the routine and update RUN_TOKEN (a new token replaces the old one).';
+    case 'http_403': return 'This account may not use the routine API (403).' + (f.detail ? '\n' + f.detail : '');
+    case 'http_404': return 'The routine was not found (404). Check RUN_URL.';
+    case 'http_429': return 'Too many starts this hour (429). Wait before trying again.';
+    case 'request_failed': return 'Could not reach Anthropic: ' + (f.detail || 'unknown error');
+    default: return 'Not started (' + f.error + ').' + (f.detail ? '\n' + f.detail : '');
+  }
+}
+
+function menuQueueAndRun() {
+  var ui = SpreadsheetApp.getUi();
+  var bad = fireCheck_();
+  if (bad) { ui.alert('Not started', fireProblemText_(bad), ui.ButtonSet.OK); return; }
+  var pre = queueManual_({ dryRun: true });
+  if (!pre.ok) {
+    ui.alert(pre.error === 'no_rows_ticked' ? 'Nothing is ticked on the Manual tab. Tick "queue" on the rows you want, then try again.'
+                                            : 'Not started: ' + pre.error);
+    return;
+  }
+  var plan = pre.result.plan, probs = pre.result.problems;
+  if (!plan.length) { ui.alert('Nothing to queue.' + (probs.length ? '\n\n' + probs.join('\n') : '')); return; }
+  var seen = {}, phones = 0;
+  plan.forEach(function (p) { if (!seen[p.phone]) { seen[p.phone] = true; phones++; } });
+  var rate = Number(settingsMap_().cost_per_phone_minute) || 0;
+  var estMin = phones * 6;
+  var cost = rate ? ' (about ' + (estMin * rate).toFixed(2) + ' ' + (settingsMap_().currency || '') + ')' : '';
+  var ans = ui.alert('Queue and start now?',
+    plan.length + ' task(s) on ' + phones + ' phone(s) will be queued as their own batch (every other pending task is held back), and the cloud routine will start right away.\n\n' +
+    'Expect roughly ' + estMin + ' phone-minutes' + cost + '. Cloud phones bill per minute.' +
+    (probs.length ? '\n\nProblems (those rows stay ticked and are not queued):\n  ' + probs.join('\n  ') : ''), ui.ButtonSet.YES_NO);
+  if (ans !== ui.Button.YES) return;
+  var res = queueAndRun_();
+  if (res.ok) {
+    ui.alert('Started', 'Queued ' + res.queued + ' task(s) as batch ' + res.batch + ' and started the cloud routine.\n\nFollow it here: ' + res.fire.session_url + '\nThe Overview tab fills in as phones finish.', ui.ButtonSet.OK);
+  } else if (res.stage === 'fire' && res.queued) {
+    ui.alert('Queued, but NOT started', 'Queued ' + res.queued + ' task(s) as batch ' + res.batch + ', but the routine did not start.\n\n' + fireProblemText_(res.fire) +
+             '\n\nThe tasks wait in the queue. Start the routine from https://claude.ai/code/routines (Run now) once it is fixed.', ui.ButtonSet.OK);
+  } else if (res.stage === 'fire') {
+    ui.alert('Not started', fireProblemText_(res.fire), ui.ButtonSet.OK);
+  } else {
+    ui.alert('Not queued', String(res.error) + (res.problems && res.problems.length ? '\n\n' + res.problems.join('\n') : ''), ui.ButtonSet.OK);
+  }
 }
 
 function menuRunNow() {
