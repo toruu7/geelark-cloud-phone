@@ -10,6 +10,7 @@
 """
 import json
 import os
+import random
 import re
 import threading
 import time
@@ -308,6 +309,7 @@ def _r_deep_link(ctx, p):
 # from an unreadable screen (the UI dump fails on a busy watch page).
 # ---------------------------------------------------------------------------
 YOUTUBE_URL_RE = re.compile(r"^https://(www\.|m\.)?(youtube\.com|youtu\.be)/\S+$")
+CLAIM_RETRIES = 8          # consecutive failed task claims before a worker gives up on its phone
 AD_MARKERS = ("sponsored", "skip ad", "visit advertiser", "visit site", "my ad center", "like ad", "share ad",
               "close ad panel", "more info", "book now", "learn more")
 SKIP_LABELS = ("skip ad", "skip ads", "skip")
@@ -1081,9 +1083,11 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
                 give_back()
                 failures += 1
                 reporter.event("error", f"could not fetch tasks: {e}", name)
-                if failures >= 3:
+                # Apps Script answers some requests with an HTML error page when many phones claim at once (seen: 27 in one
+                # wave). Giving up after three left tasks pending; back off with jitter and keep trying for about two minutes.
+                if failures >= CLAIM_RETRIES:
                     return
-                time.sleep(2 * failures)
+                time.sleep(min(30.0, 3.0 * failures) + random.random() * 2)
                 continue
             failures = 0
             if task is None:

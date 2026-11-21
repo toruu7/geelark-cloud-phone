@@ -77,9 +77,14 @@ class FakeSheet:
         self.lock = threading.Lock()
         self.reject_writes = False
 
+    flaky_claims = 0           # the next N claims fail with an HTML error page, then claiming works again
+
     def claim(self, worker, limit=1, exact=False):
         if self.claim_error:
             raise gl_sheets.SheetsError("claim failed: unauthorized")
+        if self.flaky_claims > 0:
+            self.flaky_claims -= 1
+            raise gl_sheets.SheetsError("claim failed: non_json_response <!DOCTYPE html>")
         with self.lock:
             for i, t in enumerate(self.queue):
                 dev = t.get("device") or ""
@@ -444,9 +449,20 @@ class TestRunner(PatchedCase):
     def test_sheet_claim_failure_stops_worker_and_is_logged(self):
         self.use_fake(FakeAdb(devices=("A",)))
         sheet = FakeSheet([{"task_id": "x", "action": "key", "params": '{"name":"home"}'}], claim_error=True)  # waiting task => not idle
-        res = gl_bulk.run_bulk(client=sheet, log_dir=self.tmp.name)
+        with patch.object(gl_bulk.time, "sleep"):                  # no real backoff in the test
+            res = gl_bulk.run_bulk(client=sheet, log_dir=self.tmp.name)
         self.assertEqual(res["total"], 0)
-        self.assertEqual(len([l for l in sheet.logs if "could not fetch tasks" in l["message"]]), 3)
+        self.assertEqual(len([l for l in sheet.logs if "could not fetch tasks" in l["message"]]), gl_bulk.CLAIM_RETRIES)
+
+    def test_transient_claim_failures_are_retried_and_the_tasks_still_run(self):
+        # Apps Script sometimes answers a claim with an HTML page; a worker must ride that out, not abandon its phone
+        self.use_fake(FakeAdb(devices=("A",)))
+        sheet = FakeSheet([{"task_id": "x", "device": "A", "action": "key", "params": '{"name":"home"}'}])
+        sheet.flaky_claims = gl_bulk.CLAIM_RETRIES - 2
+        with patch.object(gl_bulk.time, "sleep"):
+            res = gl_bulk.run_bulk(client=sheet, log_dir=self.tmp.name)
+        self.assertEqual((res["total"], res["success"]), (1, 1))
+        self.assertEqual(sheet.queue, [])
 
     def test_failed_sheet_writes_are_spooled_then_flushed(self):
         fake = self.use_fake(FakeAdb(devices=("A",)))
