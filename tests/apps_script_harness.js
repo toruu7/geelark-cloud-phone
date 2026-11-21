@@ -105,10 +105,10 @@ class Sheet {
 function fmtDate(date, tz, pattern) {
   const parts = {};
   new Intl.DateTimeFormat('en-GB', { timeZone: tz || 'UTC', year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(date).forEach((p) => { parts[p.type] = p.value; });
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).formatToParts(date).forEach((p) => { parts[p.type] = p.value; });
   if (parts.hour === '24') parts.hour = '00';
   return pattern.replace('yyyy', parts.year).replace('MM', parts.month).replace('dd', parts.day)
-    .replace('HH', parts.hour).replace('mm', parts.minute);
+    .replace('HH', parts.hour).replace('mm', parts.minute).replace('ss', parts.second);
 }
 
 function load(options = {}) {

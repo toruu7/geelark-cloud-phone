@@ -23,7 +23,7 @@ const T0 = '2026-11-03T08:00:00Z';   // 08:00 UTC, before the default 09:00 run 
 test('setup creates every tab, seeds the library and settings, installs one trigger', () => {
   const env = load();
   env.setup();
-  for (const n of ['Tasks', 'Reports', 'Runs', 'Routine', 'Phones', 'Library', 'Playbooks', 'Settings', 'Costs', 'Overview', '_state']) assert.ok(env.sheet(n), n);
+  for (const n of ['Tasks', 'Reports', 'Runs', 'Routine', 'Phones', 'Library', 'Playbooks', 'Settings', 'Costs', 'Manual', 'Overview', '_state']) assert.ok(env.sheet(n), n);
   assert.ok(env.rows('Library').length >= 15);
   deepEqual(env.state.triggers, ['tick']);
   env.setup();                                                    // idempotent
@@ -474,6 +474,97 @@ test('the Costs tab of an older layout gains the new columns on the first cost w
   env.post({ action: 'cost', run_id: 'r', device: 'd', phone_id: 'p', minutes: 1, status: 'open', started: '2026-11-16T05:36:33+00:00' });
   const r = env.rows('Costs')[0];
   assert.ok('status' in r && 'started' in r && 'ended' in r && 'note' in r);
+});
+
+// ---------------------------------------------------------------- manual queue (Manual tab)
+function manualRow(env, queue, phone, task, value = '', duration = '') {
+  env.sheet('Manual').appendRow([queue, phone, task, value, duration, '', '', '', '']);
+}
+
+test('Manual tab: only ticked rows are queued as their own batch, then unticked and stamped', () => {
+  const env = fresh();
+  env.addRoutine(true, 'Phone 4', 'Check phone is online');                 // the Routine must be left alone
+  manualRow(env, true, 'Phone 4', 'Check phone is online');
+  manualRow(env, false, 'Phone 5', 'Check phone is online');                // not ticked
+  const dry = env.post({ action: 'queue_manual', dry_run: true });
+  assert.equal(dry.ok, true);
+  assert.equal(dry.result.plan.length, 1);
+  assert.equal(taskRows(env).length, 0);                                    // a dry run writes nothing
+  const res = env.post({ action: 'queue_manual' });
+  assert.equal(res.ok, true);
+  assert.equal(res.result.enqueued, 1);
+  assert.match(res.result.batch, /^\d{4}-\d{2}-\d{2}-manual-\d{6}$/);
+  const t = taskRows(env);
+  assert.equal(t.length, 1);
+  assert.equal(t[0].phone, 'Phone 4');
+  assert.equal(t[0].batch, res.result.batch);
+  const m = env.rows('Manual');
+  assert.equal(m[0].status, 'queued');
+  assert.equal(String(m[0].queue).toLowerCase(), 'false');                  // unticked after queueing
+  assert.equal(m[0].batch, res.result.batch);
+  assert.ok(m[0].queued_at);
+  assert.equal(m[1].status, '');                                            // the unticked row is untouched
+});
+
+test('Manual tab: groups and playbooks expand like Routine rows', () => {
+  const env = fresh();
+  env.sheet('Phones').set(2, 6, 'Watchers');
+  env.sheet('Phones').set(3, 6, 'Watchers');
+  env.addPlaybookStep('Two steps', 'Check phone is online');
+  env.addPlaybookStep('', 'Wait', '', '10');
+  manualRow(env, true, 'Watchers', 'Two steps');
+  const res = env.post({ action: 'queue_manual' });
+  assert.equal(res.result.enqueued, 4);                                      // 2 phones x 2 steps
+  deepEqual(taskRows(env).map((r) => r.phone).sort(), ['Phone 4', 'Phone 4', 'Phone 5', 'Phone 5']);
+});
+
+test('Manual tab: problems stay ticked with the reason, and a switched-off phone is reported, not skipped quietly', () => {
+  const env = fresh();
+  env.addPhone(false, 'Sleeper', 'cloud', 'sleepid');
+  manualRow(env, true, 'Phone 4', 'Check phone is online');
+  manualRow(env, true, 'Sleeper', 'Check phone is online');
+  manualRow(env, true, 'Phone 5', 'No such task');
+  manualRow(env, true, 'Nobody', 'Check phone is online');
+  const res = env.post({ action: 'queue_manual' });
+  assert.equal(res.ok, true);
+  assert.equal(res.result.enqueued, 1);
+  const m = env.rows('Manual');
+  assert.equal(m[0].status, 'queued');
+  for (const i of [1, 2, 3]) {
+    assert.match(m[i].status, /^problem: /);
+    assert.equal(String(m[i].queue).toLowerCase(), 'true');                  // stays ticked so it can be fixed
+  }
+  assert.match(m[1].status, /switched off/);
+  assert.match(m[2].status, /not in the Library/);
+  assert.match(m[3].status, /not a phone or a group/);
+});
+
+test('Manual tab: "run only these" parks every other pending task; without it they stay pending', () => {
+  const env = fresh();
+  env.addRoutine(true, 'Phone 5', 'Check phone is online');
+  env.post({ action: 'enqueue', force: true });                               // something else is pending
+  const other = taskRows(env)[0].task_id;
+  manualRow(env, true, 'Phone 4', 'Check phone is online');
+  env.post({ action: 'queue_manual' });                                       // no hold-back
+  assert.equal(taskRows(env).find((r) => r.task_id === other).status, 'pending');
+  manualRow(env, true, 'Phone 4', 'Wait', '', '10');
+  const res = env.post({ action: 'queue_manual', hold_others: true });
+  const rows = taskRows(env);
+  assert.equal(rows.find((r) => r.task_id === other).status, 'expired');
+  assert.match(rows.find((r) => r.task_id === other).result, /held back/);
+  const mine = rows.filter((r) => r.batch === res.result.batch);
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0].status, 'pending');                                    // the new batch is never parked
+});
+
+test('Manual tab: refuses while paused, and when nothing is ticked', () => {
+  const env = fresh();
+  assert.equal(env.post({ action: 'queue_manual' }).error, 'no_rows_ticked');
+  manualRow(env, true, 'Phone 4', 'Check phone is online');
+  env.setSetting && env.setSetting('paused', true);
+  if (!env.setSetting) env.sheet('Settings').appendRow(['paused', true, '']);
+  assert.equal(env.post({ action: 'queue_manual' }).error, 'paused');
+  assert.equal(taskRows(env).length, 0);
 });
 
 // ---------------------------------------------------------------- daily report email

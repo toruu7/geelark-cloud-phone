@@ -20,7 +20,7 @@
  */
 
 var TAB = { TASKS: 'Tasks', REPORTS: 'Reports', RUNS: 'Runs', ROUTINE: 'Routine', PHONES: 'Phones',
-            LIBRARY: 'Library', PLAYBOOKS: 'Playbooks', SETTINGS: 'Settings', COSTS: 'Costs', HANDOFF: 'Handoff', DASH: 'Overview', STATE: '_state' };
+            LIBRARY: 'Library', PLAYBOOKS: 'Playbooks', SETTINGS: 'Settings', COSTS: 'Costs', HANDOFF: 'Handoff', MANUAL: 'Manual', DASH: 'Overview', STATE: '_state' };
 
 var HEADERS = {
   Tasks: ['task_id', 'device', 'action', 'params', 'status', 'attempts', 'worker', 'claimed_at', 'finished_at', 'result',
@@ -33,6 +33,7 @@ var HEADERS = {
   Library: ['name', 'action', 'params_template', 'value_hint', 'description'],
   Playbooks: ['playbook', 'task', 'value', 'duration_s', 'note'],
   Settings: ['setting', 'value', 'help'],
+  Manual: ['queue', 'phone', 'task', 'value', 'duration_s', 'note', 'status', 'batch', 'queued_at'],
   Handoff: ['done', 'phone', 'channel', 'video_link', 'what_to_do', 'assigned_to', 'done_at', 'notes'],
   Costs: ['date', 'timestamp', 'run_id', 'device', 'phone_id', 'minutes', 'cost', 'currency', 'started', 'ended', 'status', 'note']
 };
@@ -134,6 +135,7 @@ function doPost(e) {
       case 'cost':     return out_(cost_(body));
       case 'costs_open': return out_(costsOpen_());
       case 'enqueue':  return out_(enqueueNow_(body));
+      case 'queue_manual': return out_(queueManual_({ dryRun: !!body.dry_run, holdOthers: !!body.hold_others }));
       case 'inspect':  return out_(inspect_());
       default:         return out_({ ok: false, error: 'unknown_action' });
     }
@@ -378,7 +380,8 @@ function enqueue_(opts) {
   var playbooks = readPlaybooks_();
   var library = {};
   table_(TAB.LIBRARY).rows.forEach(function (r) { if (String(r.name || '').trim()) library[String(r.name).trim()] = r; });
-  var routine = table_(TAB.ROUTINE).rows;
+  var routine = opts.rows || table_(TAB.ROUTINE).rows;         // the Manual tab passes its own ticked rows
+  var rowLabel = opts.rowLabel || 'Routine row';
   var plan = [], problems = [], counts = {};
   var groups = {};                                             // group name -> phone labels, in Phones-tab order
   Object.keys(phones).forEach(function (label) {
@@ -391,7 +394,7 @@ function enqueue_(opts) {
     var taskName = String(r.task || '').trim();
     if (!targetName && !taskName) return;                      // empty row
     if (!truthy_(r.enabled)) return;                           // switched off
-    var where = 'Routine row ' + r._row;
+    var where = rowLabel + ' ' + r._row;
     // a row names one phone, or a group: every phone in the group gets the task
     var labels = phones[targetName] ? [targetName] : groups[targetName];
     if (!labels) { problems.push(where + ': "' + targetName + '" is not a phone or a group in the Phones tab.'); return; }
@@ -402,7 +405,10 @@ function enqueue_(opts) {
   // The Library wins if a name is in both. Playbooks cannot contain playbooks.
   function addRow_(r, phoneName, where, taskName) {
     var phone = phones[phoneName];
-    if (!phone.enabled) return;                                // phone switched off: its tasks are skipped quietly
+    if (!phone.enabled) {                                      // phone switched off: the Routine skips it quietly,
+      if (opts.rows) problems.push(where + ': phone "' + phoneName + '" is switched off in the Phones tab.');   // a manual request must say so
+      return;
+    }
     if (phone.error) { problems.push(where + ': ' + phone.error); return; }
     if (!library[taskName] && playbooks[taskName]) {
       playbooks[taskName].forEach(function (st) {
@@ -441,6 +447,7 @@ function enqueue_(opts) {
   var existing = {};
   tasks.rows.forEach(function (r) { existing[String(r.task_id)] = true; });
   expireOld_(tasks, batch);
+  if (opts.holdOthers) holdOthers_(tasks, batch);
   var fresh = plan.filter(function (p) { return !existing[p.task_id]; });
   if (fresh.length) {
     var sh = tasks.sheet;
@@ -529,6 +536,15 @@ function slug_(s) {
 }
 
 // Tasks from an earlier day that never ran are marked expired so yesterday's queue can't run today.
+// "Run only these": every other pending task is parked as expired, so the runner claims nothing but this manual batch.
+function holdOthers_(tasks, batch) {
+  tasks.rows.forEach(function (r) {
+    if (String(r.status || '').trim().toLowerCase() !== 'pending') return;
+    if (batchKey_(r.batch) === batch) return;
+    setCells_(tasks, r, { status: 'expired', result: 'held back: a manual batch was queued to run on its own' });
+  });
+}
+
 function expireOld_(tasks, batch) {
   var day = String(batch).slice(0, 10);
   tasks.rows.forEach(function (r) {
@@ -780,6 +796,13 @@ function applyUi_() {
     .setHelpText('Pick a task from the Library tab').build());
   ifMissing(range(playbooksSheet, 4), strictList(DURATIONS.map(String)));
   ifMissing(range(routine, 5), strictList(DURATIONS.map(String)));
+  var manualSheet = sheet_(TAB.MANUAL);
+  ifMissing(range(manualSheet, 1), rule().requireCheckbox().build());
+  ifMissing(range(manualSheet, 2), rule().requireValueInRange(stateSheet.getRange(1, 4, 200, 1), true).setAllowInvalid(true)
+    .setHelpText('Pick a phone, or a group name from the Phones tab').build());
+  ifMissing(range(manualSheet, 3), rule().requireValueInRange(stateSheet.getRange(1, 6, 300, 1), true).setAllowInvalid(true)
+    .setHelpText('Pick a task from the Library tab, or a playbook from the Playbooks tab').build());
+  ifMissing(range(manualSheet, 5), strictList(DURATIONS.map(String)));
   ifMissing(range(phones, 1), rule().requireCheckbox().build());
   ifMissing(range(phones, 3), strictList(['cloud', 'local']));
   var tasksSheet = sheet_(TAB.TASKS);
@@ -829,6 +852,7 @@ function applyUi_() {
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('GeeLark')
     .addItem('Preview what the routine will queue', 'menuPreview')
+    .addItem('Queue ticked rows on the Manual tab', 'menuQueueManual')
     .addItem('Run the routine now (queue a manual batch)', 'menuRunNow')
     .addItem('Refresh overview status', 'menuRefresh')
     .addItem('Install / repair setup', 'setup')
@@ -840,6 +864,70 @@ function menuPreview() {
   var text = r.plan.length + ' task(s) would be queued.\n' + r.plan.map(function (p) { return '  ' + p.phone + ': ' + p.task + (p.value ? ' [' + p.value + ']' : ''); }).join('\n');
   if (r.problems.length) text += '\n\nProblems:\n  ' + r.problems.join('\n  ');
   SpreadsheetApp.getUi().alert('Routine preview', text, SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+// Queue the ticked rows of the Manual tab as a manual batch, independent of the Routine. Each ticked row is a phone (or group)
+// and a Library task (or playbook), like a Routine row. Rows that queued are unticked and stamped with the batch; rows with a
+// problem stay ticked with the reason in `status`. `holdOthers` also parks every other pending task (run only these).
+// Nothing starts until the runner runs (the daily routine at its time, or the cloud routine's "Run now").
+function queueManual_(opts) {
+  opts = opts || {};
+  var map = settingsMap_();
+  if (truthy_(map.paused) && !opts.dryRun) return { ok: false, error: 'paused' };
+  var t = table_(TAB.MANUAL);
+  var rows = [];
+  t.rows.forEach(function (r) {
+    if (!truthy_(r.queue)) return;
+    if (blank_(r.phone) && blank_(r.task)) return;
+    rows.push({ _row: r._row, enabled: true, phone: r.phone, task: r.task, value: r.value, duration_s: r.duration_s });
+  });
+  if (!rows.length) return { ok: false, error: 'no_rows_ticked' };
+  var tz = tz_(map);
+  var batch = Utilities.formatDate(NOW_(), tz, 'yyyy-MM-dd') + '-manual-' + Utilities.formatDate(NOW_(), tz, 'HHmmss');
+  var res = enqueue_({ batch: batch, dryRun: !!opts.dryRun, rows: rows, rowLabel: 'Manual row', holdOthers: !!opts.holdOthers });
+  if (opts.dryRun) return { ok: true, dry_run: true, rows: rows.length, result: res };
+  var bad = {};
+  res.problems.forEach(function (msg) {
+    var m = /^Manual row (\d+)/.exec(msg);
+    if (m) bad[m[1]] = msg.replace(/^Manual row \d+[^:]*: /, '');
+  });
+  var cols = {};
+  t.headers.forEach(function (h, i) { cols[h] = i + 1; });
+  var stamp = Utilities.formatDate(NOW_(), tz, 'yyyy-MM-dd HH:mm');
+  rows.forEach(function (r) {
+    var sh = t.sheet;
+    if (bad[r._row]) {
+      if (cols.status) sh.getRange(r._row, cols.status).setValue('problem: ' + clip_(bad[r._row]));
+      return;                                                  // stays ticked so you can fix it and queue again
+    }
+    if (cols.queue) sh.getRange(r._row, cols.queue).setValue(false);
+    if (cols.status) sh.getRange(r._row, cols.status).setValue('queued');
+    if (cols.batch) { sh.getRange(r._row, cols.batch).setNumberFormat('@'); sh.getRange(r._row, cols.batch).setValue(batch); }
+    if (cols.queued_at) { sh.getRange(r._row, cols.queued_at).setNumberFormat('@'); sh.getRange(r._row, cols.queued_at).setValue(stamp); }
+  });
+  return { ok: true, result: res };
+}
+
+function menuQueueManual() {
+  var ui = SpreadsheetApp.getUi();
+  var pre = queueManual_({ dryRun: true });
+  if (!pre.ok) {
+    ui.alert(pre.error === 'no_rows_ticked' ? 'Nothing is ticked on the Manual tab. Tick "queue" on the rows you want, then try again.'
+                                            : 'Not queued: ' + pre.error);
+    return;
+  }
+  var n = pre.result.plan.length, probs = pre.result.problems;
+  var text = n + ' task(s) for ' + pre.rows + ' ticked row(s) would be queued.' +
+             (probs.length ? '\n\nProblems (those rows stay ticked):\n  ' + probs.join('\n  ') : '');
+  if (!n) { ui.alert('Nothing to queue.\n\n' + text); return; }
+  var hold = ui.alert('Run only these?',
+    text + '\n\nYES = hold back every other pending task so only these run.\nNO = queue these in addition to whatever is already pending.\nCANCEL = do nothing.',
+    ui.ButtonSet.YES_NO_CANCEL);
+  if (hold === ui.Button.CANCEL) return;
+  var res = queueManual_({ holdOthers: hold === ui.Button.YES });
+  ui.alert(res.ok ? 'Queued ' + res.result.enqueued + ' task(s) as batch ' + res.result.batch +
+                    '.\n\nNothing starts until the runner runs: use "Run now" on the cloud routine, or wait for its next scheduled run.\nCloud phones bill per minute.'
+                  : 'Not queued: ' + res.error);
 }
 
 function menuRunNow() {
