@@ -1,0 +1,131 @@
+{
+  "name": "GeeLark automation (called by the geelark runner)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "geelark-run",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "11111111-1111-4111-8111-111111111111",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "geelark-run",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "geelark runner webhook token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// GeeLark's API wants a UUID v4 in the traceId header.\nconst uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {\n  const r = Math.random() * 16 | 0;\n  return (c === 'x' ? r : ((r & 0x3) | 0x8)).toString(16);\n});\nreturn [{ json: { ...$json, traceId: uuid } }];\n"
+      },
+      "id": "22222222-2222-4222-8222-222222222222",
+      "name": "Make traceId",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openapi.geelark.com/open/v1/task/rpa/add",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "traceId",
+              "value": "={{ $json.traceId }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  name: 'sheet run ' + $('Webhook').item.json.body.task_id,\n  remark: 'started by the geelark runner',\n  scheduleAt: Math.floor(Date.now() / 1000),\n  id: $('Webhook').item.json.body.phone_id,\n  flowId: $('Webhook').item.json.body.flow,\n  paramMap: $('Webhook').item.json.body.params || {}\n}) }}",
+        "options": {}
+      },
+      "id": "33333333-3333-4333-8333-333333333333",
+      "name": "Start GeeLark automation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        0
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "GeeLark API token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ ($json.data && $json.data.taskId)\n  ? { task_id: String($json.data.taskId) }\n  : { status: 'failed', message: String($json.msg || $json.message || $json.error || 'GeeLark did not return a task id').slice(0, 200) } }}",
+        "options": {}
+      },
+      "id": "44444444-4444-4444-8444-444444444444",
+      "name": "Answer the runner",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        720,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Make traceId",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Make traceId": {
+      "main": [
+        [
+          {
+            "node": "Start GeeLark automation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start GeeLark automation": {
+      "main": [
+        [
+          {
+            "node": "Answer the runner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

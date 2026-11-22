@@ -20,6 +20,7 @@ from datetime import datetime
 
 import gl_adb
 import gl_base
+import gl_cloud
 import gl_cloudadb
 import gl_costs
 import gl_sheets
@@ -137,6 +138,7 @@ class Ctx:
         self.run_id = run_id
         self.deadline = deadline
         self.shots_dir = shots_dir
+        self.phone_id = ""          # set by execute_task for cloud phones
         self._screen = None
         self._shots = 0
 
@@ -482,6 +484,186 @@ def _r_description_link(ctx, p):
     return ok("opened the description link", {"link_text": text[:80], "ad_seen": seen_ad, "screenshots": shots})
 
 
+# ---------------------------------------------------------------------------
+# webhook: run one of the owner's GeeLark custom automations (RPA task flows) through an n8n webhook.
+# The runner POSTs {phone_id, flow, params, ...} to the webhook; the n8n workflow starts the automation with GeeLark's
+# "Create custom task" API and answers {"task_id": "<GeeLark task id>"}. The RUNNER then follows that task through GeeLark's
+# own "Query task" API until it is completed / failed / cancelled, so the phone is never stopped while the automation is still
+# running. The webhook address and token come from the runner's environment, never from the sheet, so a sheet editor cannot
+# point the runner (or its token) at another server.
+# ---------------------------------------------------------------------------
+WEBHOOK_URL_ENV = "GEELARK_N8N_WEBHOOK_URL"
+WEBHOOK_TOKEN_ENV = "GEELARK_N8N_WEBHOOK_TOKEN"
+WEBHOOK_HEADER_ENV = "GEELARK_N8N_WEBHOOK_HEADER"          # name of the header that carries the token (default X-Webhook-Token)
+FLOW_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,64}$")
+GEELARK_TASK_STATUS = {1: "waiting", 2: "in progress", 3: "completed", 4: "failed", 7: "cancelled"}
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "[::1]", "::1")
+
+
+def _webhook_args(p):
+    """(flow, params) from `flow` / `params`, or from `spec` = "flow id [| {json params}]" (one sheet cell)."""
+    flow, extra = p.get("flow"), p.get("params")
+    if p.get("spec") and not flow:
+        left, sep, right = str(p["spec"]).partition("|")
+        flow = left.strip()
+        if sep and right.strip():
+            try:
+                extra = json.loads(right)
+            except ValueError:
+                raise TaskError('the part after "|" must be JSON, for example {"Title": "hello"}')
+    return (str(flow).strip() if flow else ""), extra
+
+
+def _v_webhook(p):
+    flow, extra = _webhook_args(p)
+    if not flow or not FLOW_RE.match(flow):
+        raise TaskError("needs the GeeLark flow id (letters, digits, - _ . : only, up to 64 characters): 'flow', or 'spec' as "
+                        "'flow id' or 'flow id | {\"Param\": \"value\"}'")
+    if extra is not None:
+        if not isinstance(extra, dict):
+            raise TaskError("the automation parameters must be a JSON object")
+        if len(json.dumps(extra)) > 4000:
+            raise TaskError("the automation parameters are too long (4000 characters max)")
+    _num(p, "max_wait_s", 30, 3600, 600)
+    _num(p, "poll_s", 5, 60, 10)
+    _num(p, "wait_s", 0, 600, 0)
+    if "track" in p and not isinstance(p["track"], bool):
+        raise TaskError("'track' must be true or false")
+
+
+def _webhook_url():
+    """The webhook address from the environment: https only (http only for localhost), no credentials inside the URL."""
+    from urllib.parse import urlparse
+    url = os.environ.get(WEBHOOK_URL_ENV, "").strip()
+    if not url:
+        return None, f"{WEBHOOK_URL_ENV} is not set on the runner (set it in the environment; never put it in the sheet)"
+    try:
+        u = urlparse(url)
+    except ValueError:
+        return None, f"{WEBHOOK_URL_ENV} is not a valid address"
+    local = (u.hostname or "") in LOCAL_HOSTS
+    if u.scheme != "https" and not (u.scheme == "http" and local):
+        return None, f"{WEBHOOK_URL_ENV} must start with https:// (http:// is only allowed for localhost)"
+    if not u.hostname or u.username or u.password:
+        return None, f"{WEBHOOK_URL_ENV} must be a plain address without a username or password"
+    return url, ""
+
+
+def _post_json(url, payload, headers, timeout=30):
+    """POST JSON; returns (http status or 0 on a network error, response text)."""
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST",
+                                 headers=dict({"Content-Type": "application/json"}, **headers))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        return 0, str(e)
+
+
+def _find_task_id(body):
+    if not isinstance(body, dict):
+        return ""
+    for src in (body, body.get("data") if isinstance(body.get("data"), dict) else {}):
+        for key in ("task_id", "taskId"):
+            v = src.get(key)
+            if v not in (None, "", False):
+                return str(v)
+    return ""
+
+
+def _scrub(text, *secrets):
+    text = str(text)
+    for s in secrets:
+        if s:
+            text = text.replace(s, "***")
+    return text
+
+
+def _query_geelark_task(task_id):
+    res = gl_cloud.cloud_api_request("/open/v1/task/query", {"ids": [task_id]}, timeout=30)
+    if res.get("status") != "success":
+        return None, str(res.get("message") or res.get("code") or "query failed")[:200]
+    items = (((res.get("response") or {}).get("data") or {}).get("items")) or []
+    return (items[0] if items else {}), ""
+
+
+def _r_webhook(ctx, p):
+    url, why = _webhook_url()
+    if not url:
+        return fail(why)
+    flow, extra = _webhook_args(p)
+    phone_id = getattr(ctx, "phone_id", "") or ""
+    if not phone_id:
+        return fail("this task needs a cloud phone (cloud:<phone id>) so the automation knows which phone to run on")
+    max_wait = _num(p, "max_wait_s", 30, 3600, 600)
+    poll = _num(p, "poll_s", 5, 60, 10)
+    track = p.get("track", True)
+    token = os.environ.get(WEBHOOK_TOKEN_ENV, "").strip()
+    headers = {}
+    if token:
+        headers[os.environ.get(WEBHOOK_HEADER_ENV, "").strip() or "X-Webhook-Token"] = token
+    payload = {"event": "geelark-automation", "task_id": ctx.task_id, "run_id": ctx.run_id, "phone_id": phone_id,
+               "flow": flow, "params": extra or {}}
+    status, text = _post_json(url, payload, headers, timeout=30)
+    if status == 0:
+        return fail("could not reach the webhook: " + _scrub(text, token, url)[:200])
+    body = {}
+    try:
+        body = json.loads(text)
+    except ValueError:
+        pass
+    if not (200 <= status < 300):
+        return fail(f"the webhook answered HTTP {status}: " + _scrub(text, token, url)[:200])
+    reply_state = str(body.get("status", "")).lower() if isinstance(body, dict) else ""
+    if reply_state in ("failed", "error") or (isinstance(body, dict) and body.get("ok") is False):
+        msg = body.get("message") or body.get("error") or "the workflow reported a failure"
+        return fail("the webhook workflow failed: " + _scrub(msg, token, url)[:200])
+    task_id = _find_task_id(body)
+    if not track:
+        if float(p.get("wait_s", 0) or 0):
+            ctx.wait(float(p["wait_s"]))
+        return ok("webhook accepted (not tracked: the phone is stopped as soon as the task list ends)", {"geelark_task_id": task_id})
+    if not task_id:
+        return fail('the webhook did not return a task id. Make the workflow answer {"task_id": "<GeeLark taskId>"} so the runner '
+                    "can wait for the automation to finish (otherwise the phone would be stopped under it).")
+    # follow the GeeLark task until it ends; never stop the phone while it is still running
+    started = time.monotonic()
+    limit = min(ctx.deadline - 5, started + max_wait)
+    bad_polls, last = 0, ""
+    while True:
+        item, err = _query_geelark_task(task_id)
+        if item is None:
+            bad_polls += 1
+            last = err
+            if bad_polls >= 6:
+                return fail(f"could not read GeeLark task {task_id}: {last}", {"geelark_task_id": task_id})
+        else:
+            bad_polls = 0
+            code = item.get("status")
+            if code == 3:
+                return ok("GeeLark automation completed", {"geelark_task_id": task_id, "cost_s": item.get("cost")})
+            if code in (4, 7):
+                what = GEELARK_TASK_STATUS.get(code, "ended")
+                desc = str(item.get("failDesc") or "").strip()
+                fcode = item.get("failCode")
+                return fail(f"GeeLark automation {what}" + (f": {desc}" if desc else "") + (f" (code {fcode})" if fcode else ""),
+                            {"geelark_task_id": task_id})
+        if time.monotonic() + poll >= limit:
+            break
+        time.sleep(poll)
+    try:                                     # do not leave it running on a phone we are about to stop
+        gl_cloud.cloud_api_request("/open/v1/task/cancel", {"ids": [task_id]}, timeout=30)
+        tail = "; the task was cancelled"
+    except Exception:
+        tail = "; cancelling it failed, check GeeLark"
+    return fail(f"GeeLark automation did not finish within {int(max_wait)} s (last status: "
+                f"{GEELARK_TASK_STATUS.get((item or {}).get('status'), 'unknown')}){tail}", {"geelark_task_id": task_id})
+
+
 def _v_key(p):
     name = _str(p, "name").lower()
     if name not in gl_adb.KEYCODES:
@@ -721,6 +903,7 @@ ACTIONS = {
     "assert-text": {"validate": _v_ui_text, "run": _r_assert_text},
     "check-device": {"validate": _v_check, "run": _r_check},
     "description-link": {"validate": _v_description_link, "run": _r_description_link},
+    "webhook": {"validate": _v_webhook, "run": _r_webhook, "timeout": lambda p: _num(p, "max_wait_s", 30, 3600, 600) + 60},
     "flow": {"validate": _v_flow, "run": _r_flow},
 }
 
@@ -845,8 +1028,11 @@ def execute_task(device, task, run_id, retries, task_timeout, shots_dir, reporte
     attempts, result, status = 0, None, "failed"
     for attempt in range(1, retries + 2):
         attempts = attempt
-        deadline = time.monotonic() + task_timeout
+        limit_fn = ACTIONS[task["action"]].get("timeout")           # a task type may need longer than the global limit
+        limit = max(task_timeout, limit_fn(task["params"])) if limit_fn else task_timeout
+        deadline = time.monotonic() + limit
         ctx = Ctx(device, task["task_id"], run_id, deadline, shots_dir)
+        ctx.phone_id = gl_cloudadb.phone_id(task["device"]) if gl_cloudadb.is_cloud_device(task.get("device")) else ""
         try:
             state = ctx.state()
             if state != "device":

@@ -18,7 +18,7 @@ The plan (which phones, which tasks, in what order, limits, pause switch) lives 
 
 ## Steps (from the repository root)
 
-1. **Preconditions.** Check `python3 --version` and that the three variables above are SET. If `GEELARK_TRANSPORT` is `api`, no adb is needed (everything goes over HTTPS). Otherwise check `adb version` (if missing run `apt-get update && apt-get install -y adb`; the update matters, because a fresh sandbox has empty package lists). If something is missing, stop and report exactly what (nothing has started yet).
+1. **Preconditions.** (`GEELARK_N8N_WEBHOOK_URL` / `GEELARK_N8N_WEBHOOK_TOKEN` are optional: they are only needed when the plan contains the "GeeLark automation (n8n)" task; check they are SET, never print them.) Check `python3 --version` and that the three variables above are SET. If `GEELARK_TRANSPORT` is `api`, no adb is needed (everything goes over HTTPS). Otherwise check `adb version` (if missing run `apt-get update && apt-get install -y adb`; the update matters, because a fresh sandbox has empty package lists). If something is missing, stop and report exactly what (nothing has started yet).
 
 2. **Is there work?**
    `python3 scripts/geelark.py bulk-run --only-cloud --probe`

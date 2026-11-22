@@ -208,7 +208,8 @@ function seedTasks() {
     env.clearExamples();
     env.addPhone(true, 'P1', 'cloud', 'abc123');
     // description-link takes "video link | link text" in its one value cell
-    const value = lib.action === 'description-link' ? 'https://www.youtube.com/watch?v=Bm84BAtOfQw&t=3 | example.com' : 'https://www.youtube.com/watch?v=Bm84BAtOfQw&t=3';
+    const value = lib.action === 'description-link' ? 'https://www.youtube.com/watch?v=Bm84BAtOfQw&t=3 | example.com'
+      : lib.action === 'webhook' ? '562316072435344885 | {"Title": "hello"}' : 'https://www.youtube.com/watch?v=Bm84BAtOfQw&t=3';
     env.addRoutine(true, 'P1', lib.name, value, 30);
     const res = env.ctx.enqueue_({ batch: '2026-11-03', dryRun: true });
     res.plan.forEach((p) => out.push({ task_id: p.task_id, device: p.device, action: p.action, params: p.params, name: lib.name }));

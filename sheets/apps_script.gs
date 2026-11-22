@@ -40,7 +40,7 @@ var HEADERS = {
 
 // Must match the runner's actions (scripts/gl_bulk.py ACTIONS); a test keeps the two lists in sync.
 var ALLOWED_ACTIONS = ['open-app', 'force-stop', 'deep-link', 'key', 'tap', 'swipe', 'type', 'sleep', 'screenshot',
-                       'click-text', 'wait-text', 'assert-text', 'check-device', 'description-link', 'flow'];
+                       'click-text', 'wait-text', 'assert-text', 'check-device', 'description-link', 'webhook', 'flow'];
 
 var STALE_MINUTES = 15;        // a task stuck in "running" longer than this is handed out again
 var CELL_LIMIT = 2000;         // keep cells small; full detail lives in the runner's local JSONL log
@@ -92,6 +92,8 @@ var LIBRARY_SEED = [
     '', 'Opens the YouTube Shorts feed and swipes to a new Short every ~7 seconds for about 2 minutes. Browse only: no likes, comments or subscribes.'],
   ['Click description link', 'description-link', '{"spec":"{value}"}', 'video link | link text [| tap height, e.g. 0.39]',
     'Opens the video, waits out any ad, opens the description, then TAPS the link whose text you give: it opens in the in-app browser tab and the page loads. Waits, screenshots the page, then goes back. Value = video link, a bar, then the link text. Stops without tapping if an ad is on screen or the description cannot be confirmed.'],
+  ['GeeLark automation (n8n)', 'webhook', '{"spec":"{value}"}', 'flow id  [| {"Param": "value"}]',
+    'Runs one of your GeeLark custom automations on the phone through your n8n webhook, waits until GeeLark reports it finished (up to 10 minutes), then the phone is stopped as usual. Value = the GeeLark flow id, optionally a bar and the automation parameters as JSON. Needs GEELARK_N8N_WEBHOOK_URL on the runner (see references/n8n_geelark_automation.md).'],
   ['Skip ad if shown', 'wait-text', '{"text":"Skip","timeout":30,"click":true,"optional":true}', '', 'Taps Skip if an ad shows it; fine if there is no ad.'],
   ['Wait', 'sleep', '{"seconds":{duration}}', 'duration', ''],
   ['Next video (swipe up)', 'swipe', '{"x1":0.5,"y1":0.78,"x2":0.5,"y2":0.25,"duration_ms":350}', '', ''],
