@@ -157,7 +157,7 @@ How it works:
   (default) you read the draft and set `approved`; untick it for fully unattended use.
 - Gemini skips a video it cannot understand or that is sensitive (`skipped`, reason in `note`). Drafts are plain ASCII, with no
   links, mentions or hashtags, and avoid the wording of that account's recent comments and of other accounts' comments on the same video.
-- Approved rows are queued with the daily batch (or on demand: menu **Queue approved rows on the Videos tab**, or the
+- Approved rows are queued with the daily batch (or on demand: menu **Queue approved Videos rows AND start the cloud routine** - it holds every other pending task back so only these run - or **Queue approved rows on the Videos tab**, or the
   `queue_videos` web action). Each becomes one `Like video` / `Comment on video` / `Like + comment on video` task.
 - **Queue-time rules, read from the Tasks history** (so they hold when the runner keeps no files): a phone never repeats a video,
   the same comment text is never queued twice, and `max_likes_per_day` / `max_comments_per_day` are enforced per phone per day.

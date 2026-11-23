@@ -886,6 +886,7 @@ function onOpen() {
     .addItem('Queue ticked rows on the Manual tab', 'menuQueueManual')
     .addItem('Draft comments for the Videos tab now', 'menuDraftVideos')
     .addItem('Queue approved rows on the Videos tab', 'menuQueueVideos')
+    .addItem('Queue approved Videos rows AND start the cloud routine', 'menuQueueVideosAndRun')
     .addItem('Queue ticked rows AND start the cloud routine', 'menuQueueAndRun')
     .addItem('Run the routine now (queue a manual batch)', 'menuRunNow')
     .addItem('Refresh overview status', 'menuRefresh')
@@ -1523,6 +1524,44 @@ function queueVideos_(opts) {
   var res = enqueue_({ batch: batch, rows: plan.rows, rowLabel: 'Videos row', holdOthers: !!opts.holdOthers });
   applyVideoMarks_(plan, batch, res.problems);
   return { ok: true, result: res, marks: plan.marks };
+}
+
+// Queue the approved Videos rows as "run only these" and start the cloud routine, like queueAndRun_ does for the Manual tab.
+// Nothing is queued unless the routine trigger is ready.
+function queueVideosAndRun_() {
+  var bad = fireCheck_();
+  if (bad) return { ok: false, stage: 'fire', fire: bad };
+  var q = queueVideos_({ holdOthers: true });
+  if (!q.ok) return { ok: false, stage: 'queue', error: q.error };
+  if (!q.result.enqueued) return { ok: false, stage: 'queue', error: 'nothing_queued', problems: q.result.problems };
+  var f = fireRoutine_();
+  return { ok: f.ok, stage: f.ok ? 'started' : 'fire', queued: q.result.enqueued, batch: q.result.batch, problems: q.result.problems, fire: f };
+}
+
+function menuQueueVideosAndRun() {
+  var ui = SpreadsheetApp.getUi();
+  var bad = fireCheck_();
+  if (bad) { ui.alert('Not started', fireProblemText_(bad), ui.ButtonSet.OK); return; }
+  var pre = queueVideos_({ dryRun: true });
+  if (!pre.ok) { ui.alert('Not started: ' + pre.error); return; }
+  if (!pre.rows) { queueVideos_({}); ui.alert('Nothing to queue', 'No approved row on the Videos tab can be queued right now. See the note column for why.', ui.ButtonSet.OK); return; }
+  var rate = Number(settingsMap_().cost_per_phone_minute) || 0;
+  var estMin = pre.rows * 6;
+  var ans = ui.alert('Queue and start now?',
+    pre.rows + ' task(s) from the Videos tab will be queued as their own batch (every other pending task is held back), and the cloud routine will start right away.\n\n' +
+    'Expect roughly ' + estMin + ' phone-minutes' + (rate ? ' (about ' + (estMin * rate).toFixed(2) + ' ' + (settingsMap_().currency || '') + ')' : '') + '. Cloud phones bill per minute.', ui.ButtonSet.YES_NO);
+  if (ans !== ui.Button.YES) return;
+  var res = queueVideosAndRun_();
+  if (res.ok) {
+    ui.alert('Started', 'Queued ' + res.queued + ' task(s) as batch ' + res.batch + ' and started the cloud routine.\n\nFollow it here: ' + res.fire.session_url, ui.ButtonSet.OK);
+  } else if (res.stage === 'fire' && res.queued) {
+    ui.alert('Queued, but NOT started', 'Queued ' + res.queued + ' task(s) as batch ' + res.batch + ', but the routine did not start.\n\n' + fireProblemText_(res.fire) +
+             '\n\nThe tasks wait in the queue. Start the routine from https://claude.ai/code/routines (Run now) once it is fixed.', ui.ButtonSet.OK);
+  } else if (res.stage === 'fire') {
+    ui.alert('Not started', fireProblemText_(res.fire), ui.ButtonSet.OK);
+  } else {
+    ui.alert('Not queued', String(res.error), ui.ButtonSet.OK);
+  }
 }
 
 function menuDraftVideos() {

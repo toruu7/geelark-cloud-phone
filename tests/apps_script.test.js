@@ -1210,6 +1210,59 @@ test('queue: a problem in the queue builder lands on the Videos row, not lost', 
   assert.match(vrows(env)[0].note, /phone off/);
 });
 
+test('videos queue and start: queues only the approved rows, holds the others back, fires the routine once', () => {
+  const env = videos();
+  configureFire(env);
+  env.state.fetchHandler = null;                                                // the routine call, not Gemini
+  env.addRoutine(true, 'P3', 'Open YouTube');
+  env.post({ action: 'enqueue', force: true });                                 // another pending task that must be held back
+  const other = taskRows(env)[0].task_id;
+  addVideo(env, 'P1', 'like', V1, '', 'approved');
+  addVideo(env, 'P2', 'comment', V2, COMMENT_B, 'review_ready');                // not approved: stays out
+  const res = env.call('queueVideosAndRun_');
+  assert.equal(res.ok, true);
+  assert.equal(res.stage, 'started');
+  assert.equal(res.queued, 1);
+  assert.equal(env.state.fetches.length, 1);                                    // exactly one fire request
+  assert.equal(taskRows(env).find((r) => r.task_id === other).status, 'expired');
+  assert.equal(taskRows(env).filter((r) => r.batch === res.batch).length, 1);
+  assert.equal(vrows(env)[0].status, 'queued');
+  assert.equal(vrows(env)[1].status, 'review_ready');
+});
+
+test('videos queue and start: nothing is queued unless the trigger is ready, nothing fires when nothing is approved', () => {
+  const env = videos();
+  env.state.fetchHandler = null;
+  addVideo(env, 'P1', 'like', V1, '', 'approved');
+  const notReady = env.call('queueVideosAndRun_');
+  assert.equal(notReady.stage, 'fire');
+  assert.equal(taskRows(env).length, 0);
+  assert.equal(vrows(env)[0].status, 'approved');                               // untouched, can be queued once the trigger works
+  configureFire(env);
+  env.sheet('Videos').set(2, 6, 'review_ready');
+  const none = env.call('queueVideosAndRun_');
+  assert.equal(none.error, 'nothing_approved');
+  assert.equal(env.state.fetches.length, 0);
+  env.sheet('Videos').set(2, 6, 'approved');
+  env.setSetting('paused', true);
+  assert.equal(env.call('queueVideosAndRun_').error, 'paused');
+  assert.equal(env.state.fetches.length, 0);
+});
+
+test('videos queue and start: if the start fails after queueing, the tasks stay queued and the result says so', () => {
+  const env = videos();
+  configureFire(env);
+  env.state.fetchHandler = null;
+  env.state.fetchStatus = 400;
+  env.state.fetchBody = { type: 'error', error: { type: 'invalid_request_error', message: 'paused' } };
+  addVideo(env, 'P1', 'like', V1, '', 'approved');
+  const res = env.call('queueVideosAndRun_');
+  assert.equal(res.ok, false);
+  assert.equal(res.stage, 'fire');
+  assert.equal(res.queued, 1);
+  assert.equal(taskRows(env).length, 1);
+});
+
 test('the queued tasks match what the runner expects (recipes expand to valid flows)', () => {
   const env = videos();
   addVideo(env, 'P1', 'like+comment', V1, COMMENT_A, 'approved');
