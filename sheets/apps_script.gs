@@ -20,7 +20,8 @@
  */
 
 var TAB = { TASKS: 'Tasks', REPORTS: 'Reports', RUNS: 'Runs', ROUTINE: 'Routine', PHONES: 'Phones',
-            LIBRARY: 'Library', PLAYBOOKS: 'Playbooks', SETTINGS: 'Settings', COSTS: 'Costs', HANDOFF: 'Handoff', MANUAL: 'Manual', DASH: 'Overview', STATE: '_state' };
+            LIBRARY: 'Library', PLAYBOOKS: 'Playbooks', SETTINGS: 'Settings', COSTS: 'Costs', HANDOFF: 'Handoff', MANUAL: 'Manual',
+            VIDEOS: 'Videos', DASH: 'Overview', STATE: '_state' };
 
 var HEADERS = {
   Tasks: ['task_id', 'device', 'action', 'params', 'status', 'attempts', 'worker', 'claimed_at', 'finished_at', 'result',
@@ -34,6 +35,7 @@ var HEADERS = {
   Playbooks: ['playbook', 'task', 'value', 'duration_s', 'note'],
   Settings: ['setting', 'value', 'help'],
   Manual: ['queue', 'phone', 'task', 'value', 'duration_s', 'note', 'status', 'batch', 'queued_at'],
+  Videos: ['enabled', 'phone', 'action', 'video_link', 'comment', 'status', 'summary', 'note', 'drafted_at', 'batch'],
   Handoff: ['done', 'phone', 'channel', 'video_link', 'what_to_do', 'assigned_to', 'done_at', 'notes'],
   Costs: ['date', 'timestamp', 'run_id', 'device', 'phone_id', 'minutes', 'cost', 'currency', 'started', 'ended', 'status', 'note']
 };
@@ -67,7 +69,15 @@ var DEFAULT_SETTINGS = [
   ['max_runtime_min', '120', 'After this many minutes a run starts no NEW tasks (unfinished ones stay pending).'],
   ['task_delay_s', '2', 'Pause between tasks on the same phone.'],
   ['keep_days', '14', 'How many days of finished tasks stay in the Tasks tab (Reports keep 90 days).'],
-  ['report_email', '', 'Where to email the daily report when the day\'s tasks finish. Blank = no email.']
+  ['report_email', '', 'Where to email the daily report when the day\'s tasks finish. Blank = no email.'],
+  ['max_likes_per_day', '', 'Account safety: most likes ONE phone gives per day. Blank = no limit, 0 = none.'],
+  ['max_comments_per_day', '', 'Account safety: most comments ONE phone posts per day, and the same comment text is never used twice in a day. Blank = no limit, 0 = none.'],
+  ['wait_jitter_pct', '', 'Account safety: every Wait step varies by up to this percent (30 = a 10 s wait lasts 7-13 s). Blank/0 = exact.'],
+  ['tap_jitter_pct', '', 'Account safety: every tap lands up to this percent of the screen off the exact spot (max 3). Blank/0 = exact.'],
+  ['phone_start_stagger_s', '', 'Account safety: each phone starts at a random moment up to this many seconds after the run begins. Blank/0 = start at once.'],
+  ['comment_review', 'TRUE', 'Videos tab: tick = Gemini drafts wait for you to set status to approved. Untick = drafts are approved automatically (fully unattended).'],
+  ['gemini_model', 'gemini-2.5-flash', 'Videos tab: the Gemini model that watches each video and drafts the comment. The API key goes in Script properties as GEMINI_API_KEY, never here.'],
+  ['comment_min_confidence', '0.6', 'Videos tab: Gemini must be at least this sure (0-1) that it understood the video, or the row is skipped instead of commented.']
 ];
 
 var TIMEZONES = ['', 'UTC', 'Africa/Cairo', 'Africa/Johannesburg', 'Africa/Lagos', 'America/Chicago', 'America/Denver',
@@ -104,7 +114,13 @@ var LIBRARY_SEED = [
   ['Close YouTube', 'force-stop', '{"name":"youtube"}', '', ''],
   ['Close TikTok', 'force-stop', '{"name":"tiktok"}', '', ''],
   ['Close Chrome', 'force-stop', '{"name":"chrome"}', '', ''],
-  ['Take screenshot', 'screenshot', '{}', '', 'Saved on the runner; the file path appears in Reports.']
+  ['Take screenshot', 'screenshot', '{}', '', 'Saved on the runner; the file path appears in Reports.'],
+  ['Like video', 'flow', '{"recipe":"like","spec":"{value}"}', 'video link',
+    'ONE task: opens the video, clears ads, taps Like once, takes a proof screenshot. Give it to any phone or group. Value = the video link. Counts toward max_likes_per_day.'],
+  ['Comment on video', 'flow', '{"recipe":"comment","spec":"{value}"}', 'video link | comment text',
+    'ONE task: opens the video, clears ads, posts the comment and takes a proof screenshot. Value = video link, then a | bar, then the comment (plain ASCII, no emojis). Counts toward max_comments_per_day; the same comment text is never used twice. Never retried if it fails.'],
+  ['Like + comment on video', 'flow', '{"recipe":"like_comment","spec":"{value}"}', 'video link | comment text',
+    'ONE task: like + comment on the same video, with a proof screenshot after each. Value = video link | comment text. Never retried if it fails (a retry would un-like). Needs the English keyboard on the phone.']
 ];
 
 var DURATIONS = [5, 10, 15, 30, 45, 60, 90, 120, 180, 300, 600, 900, 1800, 3600];
@@ -138,6 +154,7 @@ function doPost(e) {
       case 'costs_open': return out_(costsOpen_());
       case 'enqueue':  return out_(enqueueNow_(body));
       case 'queue_manual': return out_(queueManual_({ dryRun: !!body.dry_run, holdOthers: !!body.hold_others }));
+      case 'queue_videos': return out_(queueVideos_({ dryRun: !!body.dry_run, holdOthers: !!body.hold_others }));
       case 'inspect':  return out_(inspect_());
       default:         return out_({ ok: false, error: 'unknown_action' });
     }
@@ -363,6 +380,9 @@ function tick() {
   } finally {
     lock.releaseLock();
   }
+  // Gemini drafts for the Videos tab. After the script lock is released on purpose: a slow Gemini call must never make the
+  // runner wait for its task claims. A small document lock keeps two overlapping ticks from drafting the same row twice.
+  safely_(draftVideosLocked_);
 }
 
 function enqueueNow_(body) {
@@ -382,7 +402,8 @@ function enqueue_(opts) {
   var playbooks = readPlaybooks_();
   var library = {};
   table_(TAB.LIBRARY).rows.forEach(function (r) { if (String(r.name || '').trim()) library[String(r.name).trim()] = r; });
-  var routine = opts.rows || table_(TAB.ROUTINE).rows;         // the Manual tab passes its own ticked rows
+  var videoPlan = opts.rows ? null : planVideos_();            // approved Videos rows ride along with the daily batch
+  var routine = opts.rows || table_(TAB.ROUTINE).rows.concat(videoPlan.rows);   // the Manual tab passes its own ticked rows
   var rowLabel = opts.rowLabel || 'Routine row';
   var plan = [], problems = [], counts = {};
   var groups = {};                                             // group name -> phone labels, in Phones-tab order
@@ -396,7 +417,7 @@ function enqueue_(opts) {
     var taskName = String(r.task || '').trim();
     if (!targetName && !taskName) return;                      // empty row
     if (!truthy_(r.enabled)) return;                           // switched off
-    var where = rowLabel + ' ' + r._row;
+    var where = (r._video ? 'Videos row' : rowLabel) + ' ' + r._row;
     // a row names one phone, or a group: every phone in the group gets the task
     var labels = phones[targetName] ? [targetName] : groups[targetName];
     if (!labels) { problems.push(where + ': "' + targetName + '" is not a phone or a group in the Phones tab.'); return; }
@@ -459,6 +480,7 @@ function enqueue_(opts) {
   problems.forEach(function (msg) {
     appendObj_(TAB.REPORTS, { timestamp: NOW_().toISOString(), device: '', action: 'routine', status: 'error', message: clip_(msg) });
   });
+  if (videoPlan) applyVideoMarks_(videoPlan, batch, problems);
   var props = PropertiesService.getScriptProperties();
   props.setProperty('LAST_BATCH', batch);
   props.setProperty('LAST_BATCH_AT', NOW_().toISOString());
@@ -805,6 +827,13 @@ function applyUi_() {
   ifMissing(range(manualSheet, 3), rule().requireValueInRange(stateSheet.getRange(1, 6, 300, 1), true).setAllowInvalid(true)
     .setHelpText('Pick a task from the Library tab, or a playbook from the Playbooks tab').build());
   ifMissing(range(manualSheet, 5), strictList(DURATIONS.map(String)));
+  var videosSheet = sheet_(TAB.VIDEOS);
+  ifMissing(range(videosSheet, 1), rule().requireCheckbox().build());
+  ifMissing(range(videosSheet, 2), rule().requireValueInRange(stateSheet.getRange(1, 4, 200, 1), true).setAllowInvalid(true)
+    .setHelpText('One phone for a comment (each account needs its own text). A like-only row may name a group.').build());
+  ifMissing(range(videosSheet, 3), strictList(['like', 'comment', 'like+comment']));
+  ifMissing(range(videosSheet, 6), rule().requireValueInList(['review_ready', 'approved', 'skipped'], true).setAllowInvalid(true)
+    .setHelpText('Set approved once you are happy with the comment. The script fills the other values.').build());
   ifMissing(range(phones, 1), rule().requireCheckbox().build());
   ifMissing(range(phones, 3), strictList(['cloud', 'local']));
   var tasksSheet = sheet_(TAB.TASKS);
@@ -829,7 +858,7 @@ function applyUi_() {
   table_(TAB.SETTINGS).rows.forEach(function (r) {
     var key = String(r.setting).trim();
     var cell = settings.getRange(r._row, 2);
-    if (key === 'enabled' || key === 'paused') ifMissing(cell, rule().requireCheckbox().build());
+    if (key === 'enabled' || key === 'paused' || key === 'comment_review') ifMissing(cell, rule().requireCheckbox().build());
     else if (key === 'timezone') ifMissing(cell, rule().requireValueInList(TIMEZONES, true).setAllowInvalid(true).build());
     else if (lists[key]) ifMissing(cell, rule().requireValueInList(lists[key], true).setAllowInvalid(false).build());
     if (key === 'run_time') cell.setNumberFormat('@');
@@ -855,6 +884,8 @@ function onOpen() {
   SpreadsheetApp.getUi().createMenu('GeeLark')
     .addItem('Preview what the routine will queue', 'menuPreview')
     .addItem('Queue ticked rows on the Manual tab', 'menuQueueManual')
+    .addItem('Draft comments for the Videos tab now', 'menuDraftVideos')
+    .addItem('Queue approved rows on the Videos tab', 'menuQueueVideos')
     .addItem('Queue ticked rows AND start the cloud routine', 'menuQueueAndRun')
     .addItem('Run the routine now (queue a manual batch)', 'menuRunNow')
     .addItem('Refresh overview status', 'menuRefresh')
@@ -1131,4 +1162,385 @@ function clip_(v) {
 
 function out_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Videos: Gemini watches each video and drafts the comment; nothing is posted until the draft is approved
+// ---------------------------------------------------------------------------------------------------------------
+// Everything here runs inside Google (this script + the sheet), so a scheduled runner (GitHub Actions, a VPS, the cloud
+// routine) needs no extra keys, no network access and no local files: it only ever sees the final, approved tasks, and all
+// state (drafts, approvals, who already did what) lives in the sheet.
+//
+//   Videos tab: one row = one phone + one video + one action (like | comment | like+comment).
+//   status: (blank) -> review_ready -> approved -> queued.   Also: skipped, held, error.
+//   The Gemini key is the Script property GEMINI_API_KEY (Project Settings > Script properties), never a sheet cell.
+//
+// Queue-time rules (read from the Tasks history, so they hold even when the runner has no disk): a phone never repeats a video
+// (a second Like tap would un-like), the same comment text is never used twice, and max_likes_per_day / max_comments_per_day
+// are enforced per phone per day.
+var VIDEO_TASKS = { like: 'Like video', comment: 'Comment on video', like_comment: 'Like + comment on video' };
+var MAX_DRAFTS_PER_RUN = 3;          // one Gemini call can take a minute; Apps Script stops a run after 6 minutes
+var DRAFT_TRIES = 3;                 // a call that times out is retried on later ticks, then the row becomes an error
+var COMMENT_MIN_CHARS = 20;
+var COMMENT_MAX_DEFAULT = 150;
+var DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
+var YT_ID_RE_ = /(?:youtu\.be\/|[?&]v=|\/shorts\/|\/embed\/)([A-Za-z0-9_-]{11})/;
+var COMMENT_SHAPES = [
+  'a specific question about one concrete thing in the video',
+  'a short opinion about one concrete thing in the video, then a short question about it',
+  'a request for a follow-up video or a deeper look at one concrete thing mentioned in the video',
+  'a short remark from the point of view of someone who would use it, then a question about one concrete detail'
+];
+var GEMINI_SYSTEM = 'You watch a YouTube video (audio and visuals) and write ONE comment for a real viewer account. ' +
+  'Reply ONLY with JSON: {"summary": string, "safe_to_engage": boolean, "confidence": number between 0 and 1, "comment": string}. ' +
+  'Set safe_to_engage to false if you could not properly see or hear the video, or the topic is sensitive, political, tragic, adult or otherwise inappropriate, ' +
+  'or you cannot say something specific and true about it. If safe_to_engage is false, comment must be an empty string. ' +
+  'The comment must be about ONE concrete thing actually said or shown in the video (a named feature, step, number, example or claim), never about the video in general. ' +
+  'Write like a real viewer: casual, one or two short sentences, plain ASCII only, no emojis, no hashtags, no links, no @mentions, no promotion, never say you are an AI. ' +
+  'Do not open with praise such as "great video", "love this", "nice walkthrough" or "good breakdown". ' +
+  'Use the comment shape and length limit given in the request. Do not copy or paraphrase any comment listed in the request.';
+
+function videoId_(link) {
+  var m = YT_ID_RE_.exec(String(link === undefined || link === null ? '' : link));
+  return m ? m[1] : '';
+}
+
+// "like", "comment", "like+comment" / "like + comment" / "like_comment"  ->  like | comment | like_comment ('' if unknown)
+function videoKind_(action) {
+  var a = String(action === undefined || action === null ? '' : action).toLowerCase().replace(/[\s+_-]+/g, '');
+  return a === 'like' ? 'like' : (a === 'comment' ? 'comment' : (a === 'likecomment' ? 'like_comment' : ''));
+}
+function wantsLike_(kind) { return kind === 'like' || kind === 'like_comment'; }
+function wantsComment_(kind) { return kind === 'comment' || kind === 'like_comment'; }
+function taskVideoKind_(name) {
+  for (var k in VIDEO_TASKS) if (VIDEO_TASKS[k] === name) return k;
+  return '';
+}
+
+function normText_(s) { return String(s === undefined || s === null ? '' : s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+
+// Same text, ignoring case and punctuation, or the same opening words, counts as a duplicate.
+function sameComment_(a, b) {
+  var x = normText_(a), y = normText_(b);
+  if (!x || !y) return false;
+  return x === y || (x.length >= 30 && y.length >= 30 && x.slice(0, 30) === y.slice(0, 30));
+}
+
+function limitOf_(v) {
+  if (v === undefined || v === null || String(v).trim() === '') return null;
+  var n = Number(v);
+  return isFinite(n) && n >= 0 ? n : null;
+}
+
+function commentMax_(map) {
+  var n = Number(map && map.comment_max_chars);
+  return isFinite(n) && n >= 40 && n <= 300 ? n : COMMENT_MAX_DEFAULT;
+}
+
+// Plain ASCII, no links / @ / #, within limits. Returns '' when the text cannot be used.
+function sanitizeComment_(text, max) {
+  var s = String(text === undefined || text === null ? '' : text)
+    .replace(/[‘’‛]/g, "'").replace(/[“”]/g, '"').replace(/[–—]/g, '-').replace(/…/g, '...')
+    .replace(/https?:\/\/\S+|www\.\S+/gi, ' ').replace(/[@#]\S*/g, ' ')
+    .replace(/[^\x20-\x7E]/g, ' ').replace(/\s+/g, ' ').trim();
+  return s.length < COMMENT_MIN_CHARS || s.length > max ? '' : s;
+}
+
+function scrub_(text, secret) {
+  var s = String(text && text.message ? text.message : text);
+  return secret ? s.split(secret).join('***') : s;
+}
+
+// Ask Gemini to watch the (public) video and draft a comment. Never throws; the key is sent in a header, never in the URL,
+// and is removed from every error text.
+function geminiDraft_(videoUrl, recent, others, shape, map) {
+  var key = String(PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY') || '').trim();
+  if (!key) return { ok: false, error: 'no_key' };
+  var model = String(map.gemini_model || '').trim() || DEFAULT_GEMINI_MODEL;
+  var list = function (arr) { return arr.length ? arr.map(function (c, i) { return (i + 1) + '. ' + c; }).join('\n') : '(none)'; };
+  var prompt = 'Comment shape: ' + shape + '.\nMaximum length: ' + commentMax_(map) + ' characters.\n\n' +
+    'Recent comments by this account (do not copy their wording or structure):\n' + list(recent) + '\n\n' +
+    'Comments already planned for this video by other accounts (do not repeat or paraphrase them):\n' + list(others) + '\n\n' +
+    'Watch the video and answer in the JSON shape described.';
+  var body = {
+    system_instruction: { parts: [{ text: GEMINI_SYSTEM }] },
+    contents: [{ parts: [{ file_data: { file_uri: videoUrl } }, { text: prompt }] }],
+    generationConfig: { responseMimeType: 'application/json', temperature: 0.9, mediaResolution: 'MEDIA_RESOLUTION_LOW' }
+  };
+  var resp;
+  try {
+    resp = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent', {
+      method: 'post', contentType: 'application/json', headers: { 'x-goog-api-key': key }, payload: JSON.stringify(body), muteHttpExceptions: true });
+  } catch (err) {
+    return { ok: false, error: 'request_failed', retry: true, detail: clip_(scrub_(err, key)) };
+  }
+  var code = resp.getResponseCode(), text = resp.getContentText(), data = null;
+  try { data = JSON.parse(text); } catch (e) { /* not JSON */ }
+  if (code !== 200 || !data) {
+    var msg = data && data.error && data.error.message ? data.error.message : String(text).slice(0, 200);
+    return { ok: false, error: 'http_' + code, retry: code === 429 || code >= 500, detail: clip_(scrub_(msg, key)) };
+  }
+  var parts = data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts || [];
+  var raw = parts.map(function (p) { return p.text || ''; }).join('').replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '').trim();
+  var a;
+  try { a = JSON.parse(raw); } catch (e2) { return { ok: false, error: 'bad_answer', retry: true, detail: 'Gemini did not answer in the expected JSON shape' }; }
+  return { ok: true, safe: a.safe_to_engage === true, confidence: Number(a.confidence), summary: clip_(String(a.summary || '').slice(0, 300)),
+           comment: String(a.comment || '') };
+}
+
+function videosTable_() {
+  return SpreadsheetApp.getActive().getSheetByName(TAB.VIDEOS) ? table_(TAB.VIDEOS) : null;
+}
+
+// Comment text of a Tasks row for a Library video task ("link | comment"), else ''.
+function taskComment_(value) {
+  var v = String(value === undefined || value === null ? '' : value), i = v.indexOf('|');
+  return i < 0 ? '' : v.slice(i + 1).trim();
+}
+
+// Comments this account used recently, and comments already planned for this video by other accounts: both fed to Gemini so it
+// avoids repeating them, and used to refuse duplicates.
+function commentHistory_(label, id, exceptRow) {
+  var recent = [], others = [];
+  var vt = videosTable_();
+  if (vt) vt.rows.forEach(function (r) {
+    if (r._row === exceptRow || blank_(r.comment)) return;
+    var st = String(r.status || '').toLowerCase();
+    if (st !== 'review_ready' && st !== 'approved' && st !== 'queued') return;
+    if (String(r.phone).trim() === label) recent.push(String(r.comment));
+    if (id && videoId_(r.video_link) === id) others.push(String(r.comment));
+  });
+  table_(TAB.TASKS).rows.forEach(function (r) {
+    var kind = taskVideoKind_(String(r.task || '').trim());
+    if (!wantsComment_(kind)) return;
+    var c = taskComment_(r.value);
+    if (!c) return;
+    if (String(r.phone).trim() === label) recent.push(c);
+    if (id && videoId_(r.value) === id) others.push(c);
+  });
+  return { recent: recent.slice(-5), others: others.slice(-8) };
+}
+
+function isDuplicateComment_(comment, exceptRow) {
+  var dup = false;
+  var vt = videosTable_();
+  if (vt) vt.rows.forEach(function (r) {
+    var st = String(r.status || '').toLowerCase();
+    if (r._row !== exceptRow && (st === 'review_ready' || st === 'approved' || st === 'queued') && sameComment_(r.comment, comment)) dup = true;
+  });
+  table_(TAB.TASKS).rows.forEach(function (r) {
+    var st = String(r.status || '').toLowerCase();
+    if (wantsComment_(taskVideoKind_(String(r.task || '').trim())) && (st === '' || st === 'pending' || st === 'running' || st === 'success') &&
+        sameComment_(taskComment_(r.value), comment)) dup = true;
+  });
+  return dup;
+}
+
+function draftVideosLocked_() {
+  var lock = LockService.getDocumentLock();
+  if (!lock.tryLock(1000)) return null;
+  try {
+    if (truthy_(settingsMap_().paused)) return null;
+    return draftVideos_(MAX_DRAFTS_PER_RUN);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Fill in the Videos tab: like-only rows and rows with your own comment go straight to approved; the others get a Gemini draft
+// (at most `limit` per run, the rest on the next tick). Returns counts.
+function draftVideos_(limit) {
+  var out = { drafted: 0, approved: 0, skipped: 0, errors: 0, waiting_for_key: 0, retry_later: 0 };
+  var t = videosTable_();
+  if (!t) return out;
+  need_(t, HEADERS.Videos);
+  var map = settingsMap_();
+  var review = !(map.comment_review === false || /^(false|no|off|0)$/i.test(String(map.comment_review).trim()));
+  var minConf = Number(map.comment_min_confidence);
+  if (!isFinite(minConf) || minConf < 0 || minConf > 1) minConf = 0.6;
+  var max = commentMax_(map);
+  var phones = readPhones_();
+  var started = Date.now(), calls = 0;
+  var stamp = function () { return NOW_().toISOString(); };
+
+  for (var i = 0; i < t.rows.length; i++) {
+    var r = t.rows[i];
+    if (!truthy_(r.enabled) || blank_(r.video_link) || !blank_(r.status)) continue;
+    var fail = function (note) { setCells_(t, r, { status: 'error', note: note }); out.errors++; };
+    var id = videoId_(r.video_link), kind = videoKind_(r.action), label = String(r.phone || '').trim();
+    if (!id) { fail('no YouTube link in video_link'); continue; }
+    if (!kind) { fail('action must be like, comment or like+comment'); continue; }
+    if (!label) { fail('pick a phone'); continue; }
+    if (!wantsComment_(kind)) { setCells_(t, r, { status: 'approved', note: 'like only: nothing to draft' }); out.approved++; continue; }
+    if (!phones[label]) { fail('a comment needs ONE phone (each account gets its own text), not a group or an unknown name'); continue; }
+    if (!blank_(r.comment)) {                                       // your own text: only checked, never replaced
+      var own = sanitizeComment_(r.comment, max);
+      if (!own) { fail('your comment must be ' + COMMENT_MIN_CHARS + '-' + max + ' plain characters (no emojis, links, @ or #)'); continue; }
+      setCells_(t, r, { comment: own, status: 'approved', note: 'your own comment' });
+      out.approved++;
+      continue;
+    }
+    if (out.drafted + out.retry_later >= limit || Date.now() - started > 270000) continue;   // the rest on the next tick
+    if (!PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY')) {
+      var needKey = 'Add the Script property GEMINI_API_KEY (Project Settings > Script properties); drafting starts by itself.';
+      if (String(r.note) !== needKey) setCells_(t, r, { note: needKey });
+      out.waiting_for_key++;
+      break;
+    }
+    calls++;
+    var hist = commentHistory_(label, id, r._row);
+    var shape = COMMENT_SHAPES[Math.floor(Math.random() * COMMENT_SHAPES.length)];
+    var res = geminiDraft_('https://www.youtube.com/watch?v=' + id, hist.recent, hist.others, shape, map);
+    if (!res.ok) {
+      var tries = Number((/^retry (\d)\//.exec(String(r.note)) || [0, 0])[1]) + 1;
+      if (res.retry && tries < DRAFT_TRIES) {
+        setCells_(t, r, { note: 'retry ' + tries + '/' + DRAFT_TRIES + ': ' + res.error + (res.detail ? ' ' + res.detail : '') });
+        out.retry_later++;
+        if (res.error === 'http_429') break;                        // rate limited: stop for this run
+        continue;
+      }
+      fail('Gemini failed (' + res.error + '): ' + (res.detail || ''));
+      appendObj_(TAB.REPORTS, { timestamp: stamp(), device: '', action: 'draft', status: 'error', message: clip_('Videos row ' + r._row + ': ' + res.error + ' ' + (res.detail || '')) });
+      continue;
+    }
+    var comment = sanitizeComment_(res.comment, max);
+    var why = '';
+    if (!res.safe || !(res.confidence >= minConf)) why = 'Gemini would not comment (not sure it understood the video, or not suitable)' + (res.summary ? ': ' + res.summary : '');
+    else if (!comment) why = 'the draft was not usable (empty, too short or too long, or not plain text)';
+    else if (isDuplicateComment_(comment, r._row)) why = 'the draft repeated a comment that already exists';
+    if (why) { setCells_(t, r, { status: 'skipped', summary: res.summary, note: clip_(why), drafted_at: stamp() }); out.skipped++; out.drafted++; continue; }
+    setCells_(t, r, { comment: comment, summary: res.summary, drafted_at: stamp(), status: review ? 'review_ready' : 'approved',
+      note: review ? 'Read the comment, edit it if you like, then set status to approved.' : 'auto-approved (comment_review is off)' });
+    out.drafted++;
+    if (!review) out.approved++;
+  }
+  return out;
+}
+
+// ---- queueing approved rows -----------------------------------------------------------------------------------
+// Turns approved (or limit-held) Videos rows into rows the normal queue builder understands, applying the per-phone rules.
+function planVideos_() {
+  var plan = { rows: [], marks: [] };
+  var t = videosTable_();
+  if (!t) return plan;
+  need_(t, HEADERS.Videos);
+  var map = settingsMap_();
+  var tz = tz_(map), today = Utilities.formatDate(NOW_(), tz, 'yyyy-MM-dd');
+  var maxLikes = limitOf_(map.max_likes_per_day), maxComments = limitOf_(map.max_comments_per_day), max = commentMax_(map);
+  var phones = readPhones_(), groups = {};
+  Object.keys(phones).forEach(function (l) { var g = phones[l].group; if (g) (groups[g] = groups[g] || []).push(l); });
+
+  var engaged = {}, likesToday = {}, commentsToday = {};         // from the Tasks history and earlier queued Videos rows
+  var used = [];                                                  // comment texts already queued or accepted in this pass
+  table_(TAB.TASKS).rows.forEach(function (r) {
+    var kind = taskVideoKind_(String(r.task || '').trim());
+    var st = String(r.status || '').trim().toLowerCase();
+    if (!kind || !(st === '' || st === 'pending' || st === 'running' || st === 'success')) return;
+    var label = String(r.phone || '').trim(), vid = videoId_(r.value);
+    if (vid) engaged[label + '|' + vid] = true;
+    if (wantsComment_(kind) && taskComment_(r.value)) used.push(taskComment_(r.value));
+    if (String(batchKey_(r.batch)).slice(0, 10) === today) {
+      if (wantsLike_(kind)) likesToday[label] = (likesToday[label] || 0) + 1;
+      if (wantsComment_(kind)) commentsToday[label] = (commentsToday[label] || 0) + 1;
+    }
+  });
+  t.rows.forEach(function (r) {
+    if (String(r.status || '').toLowerCase() !== 'queued') return;
+    if (phones[String(r.phone || '').trim()]) engaged[String(r.phone).trim() + '|' + videoId_(r.video_link)] = true;
+    if (!blank_(r.comment)) used.push(String(r.comment));
+  });
+  var isUsed = function (c) { return used.some(function (u) { return sameComment_(u, c); }); };
+
+  t.rows.forEach(function (r) {
+    var st = String(r.status || '').trim().toLowerCase();
+    if (!truthy_(r.enabled) || !(st === 'approved' || st === 'held')) return;
+    var mark = function (status, note) { plan.marks.push({ row: r._row, status: status, note: note }); };
+    var id = videoId_(r.video_link), kind = videoKind_(r.action), name = String(r.phone || '').trim();
+    if (!id || !kind) { mark('error', 'needs a YouTube link and an action of like, comment or like+comment'); return; }
+    var labels = phones[name] ? [name] : groups[name];
+    if (!labels) { mark('error', '"' + name + '" is not a phone or a group in the Phones tab'); return; }
+    var comment = '';
+    if (wantsComment_(kind)) {
+      if (!phones[name]) { mark('error', 'a comment needs ONE phone, not a group'); return; }
+      comment = sanitizeComment_(r.comment, max);
+      if (!comment) { mark('error', 'the comment is missing or not usable plain text'); return; }
+    }
+    var ok = [], held = [];
+    labels.forEach(function (label) {
+      var p = phones[label];
+      if (!p.enabled || p.error) { held.push(label + ': phone off'); return; }
+      if (engaged[label + '|' + id]) { held.push(label + ': already did this video'); return; }
+      if (wantsLike_(kind) && maxLikes !== null && (likesToday[label] || 0) >= maxLikes) { held.push(label + ': daily like limit'); return; }
+      if (wantsComment_(kind) && maxComments !== null && (commentsToday[label] || 0) >= maxComments) { held.push(label + ': daily comment limit'); return; }
+      if (wantsComment_(kind) && isUsed(comment)) { held.push(label + ': this comment text was already used'); return; }
+      ok.push(label);
+      if (wantsComment_(kind)) used.push(comment);
+      engaged[label + '|' + id] = true;
+      if (wantsLike_(kind)) likesToday[label] = (likesToday[label] || 0) + 1;
+      if (wantsComment_(kind)) commentsToday[label] = (commentsToday[label] || 0) + 1;
+    });
+    if (!ok.length) { mark('held', clip_(held.join('; ') || 'nothing to queue')); return; }
+    ok.forEach(function (label) {
+      plan.rows.push({ _row: r._row, _video: true, enabled: true, phone: label, task: VIDEO_TASKS[kind], duration_s: '',
+                       value: String(r.video_link).trim() + (comment ? ' | ' + comment : '') });
+    });
+    mark('queued', ok.length + ' phone(s) queued' + (held.length ? '; held: ' + held.join('; ') : ''));
+  });
+  return plan;
+}
+
+// After the tasks were written: stamp each Videos row with what happened to it (and the batch), and turn queue-builder
+// problems for a row into an error on that row.
+function applyVideoMarks_(plan, batch, problems) {
+  if (!plan || !plan.marks.length) return;
+  var t = videosTable_();
+  if (!t) return;
+  var byRow = {};
+  t.rows.forEach(function (r) { byRow[r._row] = r; });
+  var bad = {};
+  (problems || []).forEach(function (msg) {
+    var m = /^Videos row (\d+)[^:]*: (.*)$/.exec(String(msg));
+    if (m) bad[m[1]] = m[2];
+  });
+  plan.marks.forEach(function (mk) {
+    var row = byRow[mk.row];
+    if (!row) return;
+    if (bad[mk.row]) setCells_(t, row, { status: 'error', note: clip_(bad[mk.row]) });
+    else setCells_(t, row, { status: mk.status, note: mk.note, batch: mk.status === 'queued' ? batch : row.batch });
+  });
+}
+
+// Queue the approved Videos rows on their own (outside the daily batch). `holdOthers` parks every other pending task.
+function queueVideos_(opts) {
+  opts = opts || {};
+  var map = settingsMap_();
+  if (truthy_(map.paused) && !opts.dryRun) return { ok: false, error: 'paused' };
+  var plan = planVideos_();
+  if (opts.dryRun) return { ok: true, dry_run: true, rows: plan.rows.length, marks: plan.marks };
+  if (!plan.rows.length) { applyVideoMarks_(plan, '', []); return { ok: false, error: 'nothing_approved', marks: plan.marks }; }
+  var tz = tz_(map);
+  var batch = Utilities.formatDate(NOW_(), tz, 'yyyy-MM-dd') + '-videos-' + Utilities.formatDate(NOW_(), tz, 'HHmmss');
+  var res = enqueue_({ batch: batch, rows: plan.rows, rowLabel: 'Videos row', holdOthers: !!opts.holdOthers });
+  applyVideoMarks_(plan, batch, res.problems);
+  return { ok: true, result: res, marks: plan.marks };
+}
+
+function menuDraftVideos() {
+  var ui = SpreadsheetApp.getUi();
+  var r = draftVideosLocked_();
+  if (!r) { ui.alert('Videos', 'Drafting is paused (Settings > paused) or already running. Try again in a minute.', ui.ButtonSet.OK); return; }
+  ui.alert('Videos', 'Drafted ' + r.drafted + ' (approved on the spot: ' + r.approved + ', skipped: ' + r.skipped + ', errors: ' + r.errors + ').' +
+    (r.waiting_for_key ? '\n\nGEMINI_API_KEY is not set in Script properties yet.' : '') +
+    (r.retry_later ? '\n\n' + r.retry_later + ' row(s) will be retried on the next tick.' : '') +
+    '\n\nThe rest, if any, are drafted automatically every 5 minutes.', ui.ButtonSet.OK);
+}
+
+function menuQueueVideos() {
+  var ui = SpreadsheetApp.getUi();
+  var pre = queueVideos_({ dryRun: true });
+  if (!pre.ok) { ui.alert('Videos', 'Nothing to queue: ' + pre.error, ui.ButtonSet.OK); return; }
+  if (!pre.rows) { queueVideos_({}); ui.alert('Videos', 'No approved rows can be queued right now. See the note column on the Videos tab for why.', ui.ButtonSet.OK); return; }
+  if (ui.alert('Queue ' + pre.rows + ' task(s)?', 'This only queues them; the runner starts the phones. Other waiting tasks stay as they are.', ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
+  var res = queueVideos_({});
+  ui.alert('Videos', res.ok ? 'Queued ' + res.result.enqueued + ' task(s) in batch ' + res.result.batch + '.' : 'Not queued: ' + res.error, ui.ButtonSet.OK);
 }

@@ -686,8 +686,18 @@ def _v_tap(p):
     _num(p, "y", 0, 1, required=True)
 
 
+# Human-like variation, set per run from the Settings tab (0 = exact). Fixed coordinates and fixed waits repeated on every
+# phone are an easy bot signature.
+_WAIT_JITTER = 0.0     # fraction: a wait of 10 s becomes 7-13 s at 0.3
+_TAP_JITTER = 0.0      # fraction of the screen size added to or removed from a tap position
+
+
 def _r_tap(ctx, p):
-    hit = ctx.tap_normalized(p["x"], p["y"])
+    x, y = float(p["x"]), float(p["y"])
+    if _TAP_JITTER:
+        x = min(1.0, max(0.0, x + random.uniform(-_TAP_JITTER, _TAP_JITTER)))
+        y = min(1.0, max(0.0, y + random.uniform(-_TAP_JITTER, _TAP_JITTER)))
+    hit = ctx.tap_normalized(x, y)
     return ok("tapped", hit) if hit else fail("tap failed (could not read screen size or send input)")
 
 
@@ -723,7 +733,12 @@ def _v_sleep(p):
 
 
 def _r_sleep(ctx, p):
-    ctx.wait(float(p["seconds"]))
+    secs = float(p["seconds"])
+    if _WAIT_JITTER and secs > 0:
+        secs = max(0.0, secs * random.uniform(1 - _WAIT_JITTER, 1 + _WAIT_JITTER))
+        ctx.wait(secs)
+        return ok(f"slept {secs:.0f}s (varied)")
+    ctx.wait(secs)
     return ok(f"slept {p['seconds']}s")
 
 
@@ -858,8 +873,62 @@ def _r_check(ctx, p):
     return ok("device online", {"model": model[:60], "foreground": foreground_package(ctx)})
 
 
+# ---------------------------------------------------------------------------
+# Recipes: one task that likes and/or comments on a video. The Library tasks "Like video", "Comment on video" and
+# "Like + comment on video" are `flow` tasks with {"recipe": ..., "spec": "{value}"}; the sheet's value cell holds
+# "video link" (like) or "video link | comment text" (comment, like + comment). So one task can be given to any phone
+# or group, and each phone can get its own comment. Positions are fractions of a 720x1440 screen, proven on P20.
+# ---------------------------------------------------------------------------
+RECIPES = ("like", "comment", "like_comment")
+YT_ID_RE = re.compile(r"(?:youtu\.be/|[?&]v=|/shorts/|/embed/)([A-Za-z0-9_-]{11})")
+MAX_COMMENT_CHARS = 300
+_TAP_SKIP = (0.894, 0.214)        # YouTube's Skip button
+_TAP_LIKE = (0.486, 0.446)        # thumbs-up under the player
+_TAP_COMMENT_BOX = (0.5, 0.566)   # the "Comment..." box
+_TAP_SEND = (0.917, 0.401)        # red Send arrow in the comment composer
+
+
+def recipe_steps(p):
+    """Expand {"recipe": ..., "spec": "link | comment"} into flow steps. Raises TaskError on a bad recipe, link or comment."""
+    recipe = str(p.get("recipe") or "").strip().lower()
+    if recipe not in RECIPES:
+        raise TaskError(f"recipe must be one of {', '.join(RECIPES)}")
+    link, _, comment = str(p.get("spec") or "").partition("|")
+    link, comment = link.strip(), comment.strip()
+    m = YT_ID_RE.search(link)
+    if not m:
+        raise TaskError("the value needs a YouTube video link" + (" before the | and the comment" if recipe != "like" else ""))
+    if recipe != "like":
+        if len(comment) < 3:
+            raise TaskError("the value needs the comment after the |, like: https://youtu.be/ID | Great video, ...")
+        if len(comment) > MAX_COMMENT_CHARS:
+            raise TaskError(f"comment longer than {MAX_COMMENT_CHARS} characters")
+        _v_type({"text": comment})                     # printable ASCII only
+    tap = lambda xy, **kw: dict({"action": "tap", "x": xy[0], "y": xy[1]}, **kw)
+    wait = lambda s: {"action": "sleep", "seconds": s}
+    steps = [{"action": "deep-link", "url": "https://www.youtube.com/watch?v=" + m.group(1),
+              "package": "com.google.android.youtube"},
+             wait(12), tap(_TAP_SKIP), wait(10), tap(_TAP_SKIP), wait(10), tap(_TAP_SKIP), wait(10)]   # clear an ad pod
+    if recipe in ("like", "like_comment"):
+        steps += [tap(_TAP_LIKE, engage="like"), wait(3), {"action": "screenshot"}]                      # proof: thumb filled
+    if recipe in ("comment", "like_comment"):
+        steps += [tap(_TAP_COMMENT_BOX, engage="comment_open"), wait(3),
+                  {"action": "type", "text": comment, "engage": "comment_type"}, wait(2),
+                  tap(_TAP_SEND, engage="comment_send"), wait(6), {"action": "screenshot"}]               # proof: composer closed
+        # No "Newest" tap here. With the comments panel closed that spot is the Subscribe button, and a batch did
+        # subscribe a phone to a channel that way. Posted comments are checked separately, looking before any tap.
+    steps.append({"action": "force-stop", "name": "youtube"})
+    return steps
+
+
+def _flow_steps(p):
+    return p["steps"] if p.get("steps") is not None else recipe_steps(p)
+
+
 def _v_flow(p):
     steps = p.get("steps")
+    if steps is None and p.get("recipe") is not None:
+        steps = recipe_steps(p)
     if not isinstance(steps, list) or not steps:
         raise TaskError("'steps' must be a non-empty list")
     if len(steps) > MAX_STEPS:
@@ -876,16 +945,43 @@ def _v_flow(p):
             raise TaskError(f"step {i} ({act}): {e}")
 
 
+_GUARD = None          # the run's EngagementGuard, set by run_bulk; steps tagged "engage" are checked against it
+
+
 def _r_flow(ctx, p):
     results = []
-    for i, step in enumerate(p["steps"], 1):
+    guard = _GUARD
+    sent = False                 # a comment was really sent in this flow
+    engaged = skipped = 0
+    for i, step in enumerate(_flow_steps(p), 1):
         act = step["action"].lower()
+        kind = step.get("engage")
+        if guard and kind in ENGAGE_KINDS:
+            why = guard.check(ctx.device, kind, step.get("text"))
+            if why:
+                skipped += 1
+                results.append({"step": i, "action": act, "status": "skipped", "message": "skipped (account safety): " + why})
+                continue
         res = ACTIONS[act]["run"](ctx, step)
         results.append({"step": i, "action": act, "status": res["status"], "message": res["message"]})
+        if res["status"] == "success" and kind in ENGAGE_KINDS:
+            if guard:
+                guard.record(ctx.device, kind)
+            if kind in ("like", "comment_send"):
+                engaged += 1
+            if kind == "comment_send":
+                sent = True
         if res["status"] != "success" and not p.get("continue_on_error"):
             return fail(f"step {i} ({act}) failed: {res['message']}", results)
-    failed = [r for r in results if r["status"] != "success"]
-    return fail(f"{len(failed)} step(s) failed", results) if failed else ok(f"{len(results)} steps completed", results)
+    failed = [r for r in results if r["status"] not in ("success", "skipped")]
+    if failed:
+        return fail(f"{len(failed)} step(s) failed", results)
+    done = sum(1 for r in results if r["status"] == "success")
+    if skipped and not engaged:
+        return {"status": "skipped", "message": f"nothing posted: {skipped} step(s) skipped for account safety "
+                                                "(daily limit reached or comment already used)", "output": results}
+    note = f", {skipped} skipped for account safety" if skipped else ""
+    return ok(f"{done} steps completed{note}", results)
 
 
 ACTIONS = {
@@ -931,7 +1027,10 @@ def load_tasks_file(path):
 DEFAULT_SETTINGS = {"retries": 1, "max_workers": 8, "max_cloud_phones": 2, "task_timeout": 120.0,
                     "task_delay": 0.0, "max_runtime": None, "on_failure": "continue",
                     "max_phone_minutes": 8.0, "daily_phone_minutes": 120.0,
-                    "cost_per_minute": None, "currency": "USD"}
+                    "cost_per_minute": None, "currency": "USD",
+                    # account safety (None / 0 = off): per-phone daily engagement limits, human-like variation, staggered starts
+                    "max_likes_per_day": None, "max_comments_per_day": None,
+                    "wait_jitter": 0.0, "tap_jitter": 0.0, "start_stagger": 0.0}
 
 
 def _as_int(v):
@@ -940,6 +1039,10 @@ def _as_int(v):
 
 def _minutes_to_s(v):
     return float(v) * 60
+
+
+def _pct_to_fraction(v):
+    return float(v) / 100.0
 
 
 # run-setting -> (sheet key, parser, min, max)
@@ -952,6 +1055,11 @@ _SHEET_SETTINGS = {
     "max_phone_minutes": ("max_phone_minutes", float, 1, 240),
     "daily_phone_minutes": ("daily_phone_minutes", float, 1, 10000),
     "cost_per_minute": ("cost_per_phone_minute", float, 0, 1000),
+    "max_likes_per_day": ("max_likes_per_day", _as_int, 0, 1000),
+    "max_comments_per_day": ("max_comments_per_day", _as_int, 0, 1000),
+    "wait_jitter": ("wait_jitter_pct", _pct_to_fraction, 0, 0.9),     # sheet value is a percent, e.g. 30
+    "tap_jitter": ("tap_jitter_pct", _pct_to_fraction, 0, 0.03),      # percent of screen size, max 3
+    "start_stagger": ("phone_start_stagger_s", float, 0, 3600),
 }
 
 
@@ -993,6 +1101,102 @@ def resolve_settings(cli, sheet):
 
 
 # ---------------------------------------------------------------------------
+# Account safety: per-phone daily like/comment limits and a no-duplicate-comment rule.
+# A task opts in with an "engage" marker in its params (the Library templates for the like and comment taps carry it):
+#   like          the Like tap                          counts against max_likes_per_day
+#   comment_open  tapping the comment box               starts a comment; blocked once max_comments_per_day is reached
+#   comment_type  typing the comment                    blocked if the same text was already used today by any phone
+#   comment_send  the Send tap                          counts against max_comments_per_day
+# A blocked step is reported as "skipped" and the phone carries on with the rest of its tasks. Counts live in
+# <log_dir>/.engagement.json and reset each day (machine's local date), like the phone-minute cap.
+# ---------------------------------------------------------------------------
+ENGAGE_KINDS = ("like", "comment_open", "comment_type", "comment_send")
+
+
+class EngagementGuard:
+    def __init__(self, log_dir, max_likes=None, max_comments=None, today=None):
+        self.path = os.path.join(log_dir, ".engagement.json")
+        self.max_likes, self.max_comments = max_likes, max_comments
+        self.today = today or datetime.now().date().isoformat()
+        self.lock = threading.Lock()
+        self.blocked = {}                 # phone -> why the comment in progress is blocked
+        self.state = self._load()
+
+    def _load(self):
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict) or data.get("day") != self.today:
+            data = {"day": self.today, "phones": {}, "comments": []}
+        data.setdefault("phones", {})
+        data.setdefault("comments", [])
+        return data
+
+    def _save(self):
+        try:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.state, f)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass                           # a counter that cannot be saved must not stop a run
+
+    @staticmethod
+    def _norm(text):
+        return re.sub(r"\W+", " ", str(text or "").lower()).strip()
+
+    @staticmethod
+    def _key(phone):
+        """"cloud:6461..." (task device) and "api-6461..." (transport label) are the same phone: key by the phone id."""
+        m = re.search(r"\d{10,}", str(phone))
+        return m.group(0) if m else str(phone)
+
+    def counts(self, phone):
+        p = self.state["phones"].get(self._key(phone), {})
+        return p.get("likes", 0), p.get("comments", 0)
+
+    def check(self, phone, kind, text=None):
+        """Return None if the step may run, else the reason it is blocked."""
+        phone = self._key(phone)
+        with self.lock:
+            likes, comments = self.counts(phone)
+            if kind == "like":
+                if self.max_likes is not None and likes >= self.max_likes:
+                    return f"daily like limit reached ({likes}/{self.max_likes}) for this phone"
+                return None
+            if kind == "comment_open":
+                self.blocked.pop(phone, None)
+                if self.max_comments is not None and comments >= self.max_comments:
+                    self.blocked[phone] = f"daily comment limit reached ({comments}/{self.max_comments}) for this phone"
+                return self.blocked.get(phone)
+            if kind == "comment_type":
+                norm = self._norm(text)
+                if phone not in self.blocked and norm and norm in self.state["comments"]:
+                    self.blocked[phone] = ("this exact comment was already used today; the same text from several accounts "
+                                           "gets flagged")
+                if phone not in self.blocked and norm:
+                    self.state["comments"].append(norm)       # reserved now, so two phones cannot post the same text
+                    self._save()
+                return self.blocked.get(phone)
+            if kind == "comment_send":
+                return self.blocked.get(phone)
+        return None
+
+    def record(self, phone, kind):
+        """Count a successful like or posted comment."""
+        if kind not in ("like", "comment_send"):
+            return
+        phone = self._key(phone)
+        with self.lock:
+            p = self.state["phones"].setdefault(phone, {})
+            key = "likes" if kind == "like" else "comments"
+            p[key] = p.get(key, 0) + 1
+            self._save()
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 def _day_file(log_dir):
@@ -1026,6 +1230,8 @@ def execute_task(device, task, run_id, retries, task_timeout, shots_dir, reporte
     """Run one task with retries and report the final outcome. Never raises."""
     started = time.monotonic()
     attempts, result, status = 0, None, "failed"
+    if (task.get("params") or {}).get("recipe"):
+        retries = 0              # never re-run a like/comment flow: a second Like tap un-likes, and a retry could double-post
     for attempt in range(1, retries + 2):
         attempts = attempt
         limit_fn = ACTIONS[task["action"]].get("timeout")           # a task type may need longer than the global limit
@@ -1051,7 +1257,7 @@ def execute_task(device, task, run_id, retries, task_timeout, shots_dir, reporte
             break
         except Exception as e:  # never let one task kill the worker
             result, status = fail(f"{type(e).__name__}: {e}"), "error"
-        if status == "success":
+        if status in ("success", "skipped"):
             break
         if attempt <= retries:
             reporter.event("warning", f"attempt {attempt} {status}: {result['message']}; retrying", getattr(device, "label", device), task["task_id"])
@@ -1064,7 +1270,8 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
              task_timeout=120, task_delay=0.0, dry_run=False, log_dir=None, run_id=None,
              cloud=False, max_cloud_phones=2, cloud_up_timeout=180,
              only_cloud=False, max_runtime=None, on_failure="continue", probe=False, transport="adb",
-             max_phone_minutes=None, daily_phone_minutes=None, cost_per_minute=None, currency="USD"):
+             max_phone_minutes=None, daily_phone_minutes=None, cost_per_minute=None, currency="USD",
+             max_likes_per_day=None, max_comments_per_day=None, wait_jitter=0.0, tap_jitter=0.0, start_stagger=0.0):
     """Run tasks in parallel, one worker per phone. `tasks` = local list; otherwise tasks are claimed from `client`'s sheet.
 
     Local ADB phones are addressed by serial. GeeLark cloud phones are addressed as `cloud:<phone_id>`; they are only
@@ -1088,6 +1295,10 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
 
     reporter = gl_sheets.Reporter(run_id, None if dry_run else client, log_dir)
     shots_dir = os.path.join(reporter.log_dir, "shots", run_id)
+    global _WAIT_JITTER, _TAP_JITTER, _GUARD
+    _WAIT_JITTER, _TAP_JITTER = float(wait_jitter or 0.0), float(tap_jitter or 0.0)
+    guard = EngagementGuard(reporter.log_dir, max_likes_per_day, max_comments_per_day)
+    _GUARD = guard
 
     # Validate local tasks up front; invalid ones are reported, not silently dropped.
     queue, invalid = [], []
@@ -1287,7 +1498,15 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
                 reporter.report(dict(task, device=name), "skipped", 0, 0,
                                 "skipped: an earlier task on this phone failed (on_failure = stop)")
                 continue
+            kind = (task.get("params") or {}).get("engage")
+            if kind in ENGAGE_KINDS:
+                why = guard.check(name, kind, (task.get("params") or {}).get("text"))
+                if why:
+                    reporter.report(dict(task, device=name), "skipped", 0, 0, "skipped (account safety): " + why)
+                    continue
             status = execute_task(serial, dict(task, device=name), run_id, retries, task_timeout, shots_dir, reporter)
+            if status == "success" and kind in ENGAGE_KINDS:
+                guard.record(name, kind)
             if status in ("failed", "timeout", "offline"):
                 phone_failed = True
             if task_delay:
@@ -1335,6 +1554,11 @@ def run_bulk(tasks=None, client=None, devices=None, retries=1, max_workers=8, ma
         if daily_cap_s and daily_spent_s() >= daily_cap_s:      # never start a phone once the day's cap is used up
             cap_reached(name, time.monotonic())
             return
+        if start_stagger and start_stagger > 0:           # phones must not all come online in the same minute
+            delay = random.uniform(0, float(start_stagger))
+            reporter.event("info", f"random start delay: waiting {delay / 60:.1f} min before starting this phone", name)
+            if stop.wait(delay):
+                return
         t0 = time.monotonic()
         started_iso = gl_sheets.now_iso()
         with lock:

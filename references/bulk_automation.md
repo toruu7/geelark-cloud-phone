@@ -139,3 +139,27 @@ Exit codes: `0` finished, `1` could not start (no devices / no task source), `4`
 * Platforms may restrict accounts that behave like bots. Use `--task-delay` and sensible volumes; this tool does not hide automation.
 * Starting cloud phones spends money. Confirm which phones and roughly how long before using `--cloud`, and check afterwards that nothing is left running.
 * Treat the Apps Script URL + secret like a password: whoever has both can queue work onto your phones.
+
+## Videos tab: Gemini-drafted comments (built for scheduled, remote runs)
+
+Gemini drafting runs **inside the Apps Script**, not on the runner. A GitHub Actions job, a VPS or the Claude cloud routine
+therefore needs no Gemini key, no extra network access and no local state: it only runs the final, approved tasks.
+
+One-time setup (the script is not redeployed automatically):
+1. Paste the updated `sheets/apps_script.gs` into Extensions > Apps Script, run **Install / repair setup** from the GeeLark menu.
+2. Project Settings > Script properties: add `GEMINI_API_KEY` (a Gemini API key; never put it in a sheet cell).
+3. Deploy > Manage deployments > edit > New version.
+
+How it works:
+- **Videos tab**: one row = one phone + one video link + an action (`like`, `comment`, `like+comment`). Leave `comment` blank and
+  Gemini watches the (public) video and drafts one; type your own and it is only checked.
+- Every 5-minute tick drafts up to 3 rows. Status runs `review_ready` -> `approved` -> `queued`. With `comment_review` ticked
+  (default) you read the draft and set `approved`; untick it for fully unattended use.
+- Gemini skips a video it cannot understand or that is sensitive (`skipped`, reason in `note`). Drafts are plain ASCII, with no
+  links, mentions or hashtags, and avoid the wording of that account's recent comments and of other accounts' comments on the same video.
+- Approved rows are queued with the daily batch (or on demand: menu **Queue approved rows on the Videos tab**, or the
+  `queue_videos` web action). Each becomes one `Like video` / `Comment on video` / `Like + comment on video` task.
+- **Queue-time rules, read from the Tasks history** (so they hold when the runner keeps no files): a phone never repeats a video,
+  the same comment text is never queued twice, and `max_likes_per_day` / `max_comments_per_day` are enforced per phone per day.
+  A row that is held says why in `note` and is retried on the next queue.
+- Random timing on a remote runner comes from the Settings tab (`phone_start_stagger_s`, `wait_jitter_pct`, `tap_jitter_pct`).

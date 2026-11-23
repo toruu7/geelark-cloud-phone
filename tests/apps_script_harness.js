@@ -153,9 +153,13 @@ function load(options = {}) {
     UrlFetchApp: { fetch: (url, opts) => {
       state.fetches.push({ url, opts });
       if (state.fetchThrows) throw new Error(state.fetchThrows);
-      return { getResponseCode: () => state.fetchStatus, getContentText: () => (typeof state.fetchBody === 'string' ? state.fetchBody : JSON.stringify(state.fetchBody)) };
+      const h = state.fetchHandler ? state.fetchHandler(url, opts) : null;     // per-call answer: {status, body} or throws
+      const status = h ? h.status : state.fetchStatus;
+      const body = h ? h.body : state.fetchBody;
+      return { getResponseCode: () => status, getContentText: () => (typeof body === 'string' ? body : JSON.stringify(body)) };
     } },
-    LockService: { getScriptLock: () => ({ waitLock() {}, tryLock: () => true, releaseLock() {} }) },
+    LockService: { getScriptLock: () => ({ waitLock() {}, tryLock: () => true, releaseLock() {} }),
+                   getDocumentLock: () => ({ tryLock: () => true, releaseLock() {} }) },
     ContentService: { MimeType: { JSON: 'json' }, createTextOutput: (s) => ({ getContent: () => s, setMimeType() { return this; } }) },
     Utilities: { formatDate: (d, tz, p) => fmtDate(d, tz, p) },
     ScriptApp: {
@@ -208,8 +212,11 @@ function seedTasks() {
     env.clearExamples();
     env.addPhone(true, 'P1', 'cloud', 'abc123');
     // description-link takes "video link | link text" in its one value cell
-    const value = lib.action === 'description-link' ? 'https://www.youtube.com/watch?v=Bm84BAtOfQw&t=3 | example.com'
-      : lib.action === 'webhook' ? '562316072435344885 | {"Title": "hello"}' : 'https://www.youtube.com/watch?v=Bm84BAtOfQw&t=3';
+    const link = 'https://www.youtube.com/watch?v=Bm84BAtOfQw&t=3';
+    const recipe = /"recipe":"(\w+)"/.exec(lib.params_template || '');
+    const value = lib.action === 'description-link' ? link + ' | example.com'
+      : lib.action === 'webhook' ? '562316072435344885 | {"Title": "hello"}'
+      : recipe ? (recipe[1] === 'like' ? link : link + ' | Clear walkthrough, which step took the longest to set up?') : link;
     env.addRoutine(true, 'P1', lib.name, value, 30);
     const res = env.ctx.enqueue_({ batch: '2026-11-03', dryRun: true });
     res.plan.forEach((p) => out.push({ task_id: p.task_id, device: p.device, action: p.action, params: p.params, name: lib.name }));

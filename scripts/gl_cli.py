@@ -193,7 +193,9 @@ def _bulk_run(args):
                     cloud=args.cloud, max_cloud_phones=cfg["max_cloud_phones"], cloud_up_timeout=args.cloud_up_timeout,
                     only_cloud=args.only_cloud, max_runtime=cfg["max_runtime"], on_failure=cfg["on_failure"], probe=args.probe,
                     transport=transport, max_phone_minutes=cfg["max_phone_minutes"], daily_phone_minutes=cfg["daily_phone_minutes"],
-                    cost_per_minute=cfg["cost_per_minute"], currency=cfg["currency"])
+                    cost_per_minute=cfg["cost_per_minute"], currency=cfg["currency"],
+                    max_likes_per_day=cfg["max_likes_per_day"], max_comments_per_day=cfg["max_comments_per_day"],
+                    wait_jitter=cfg["wait_jitter"], tap_jitter=cfg["tap_jitter"], start_stagger=cfg["start_stagger"])
                 if wave > 0 and r.get("status") == "idle":
                     break                                  # nothing left for a further wave
                 results.append(r)

@@ -28,7 +28,7 @@ test('setup creates every tab, seeds the library and settings, installs one trig
   deepEqual(env.state.triggers, ['tick']);
   env.setup();                                                    // idempotent
   deepEqual(env.state.triggers, ['tick']);
-  assert.equal(env.rows('Settings').length, 16);
+  assert.equal(env.rows('Settings').length, 24);
   const names = env.rows('Library').map((r) => r.name);
   assert.equal(new Set(names).size, names.length);
 });
@@ -919,4 +919,302 @@ test('a broken Settings tab or Library never stops claims from working', () => {
 test('the script never hardcodes the secret', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'sheets', 'apps_script.gs'), 'utf8');
   assert.doesNotMatch(src, /SECRET['"]?\s*[:=]\s*['"][^'"]{6,}['"]/);
+});
+
+// ---------------------------------------------------------------- Videos: Gemini drafts + queue-time rules
+const KEY = 'AIza-test-key-123456';
+const V1 = 'https://www.youtube.com/watch?v=u1Yjxw2Wg4Y';
+const V2 = 'https://youtu.be/hJqZAds9TfI';
+const COMMENT_A = 'Does the Clockify to Slack zap still work if someone forgets to stop their timer?';
+const COMMENT_B = 'how does the reporting hold up once you have a few dozen open jobs, is it enough?';
+
+function gemini(comment, extra = {}) {
+  const answer = Object.assign({ summary: 'Builds five Zapier automations live.', safe_to_engage: true, confidence: 0.9, comment }, extra);
+  return { status: 200, body: { candidates: [{ content: { parts: [{ text: JSON.stringify(answer) }] } }] } };
+}
+// A fresh sheet with phones P1 (Watch 1), P2 (Watch 1), P3 (Watch 2), the Gemini key set, and a scripted Gemini.
+function videos(answers = []) {
+  const env = load();
+  env.setup();
+  env.clearExamples();
+  env.addPhone(true, 'P1', 'cloud', 'id1', 'Watch 1');
+  env.addPhone(true, 'P2', 'cloud', 'id2', 'Watch 1');
+  env.addPhone(true, 'P3', 'cloud', 'id3', 'Watch 2');
+  env.state.props.set('GEMINI_API_KEY', KEY);
+  const queue = answers.slice();
+  let n = 0;                                                                    // unique default drafts, so the duplicate rule is not triggered by accident
+  env.state.fetchHandler = () => (queue.length ? queue.shift() : gemini('Draft ' + (++n) + ': what happened at step ' + n + ' of the setup, did it work for you?'));
+  return env;
+}
+const addVideo = (env, phone, action, link, comment = '', status = '') =>
+  env.sheet('Videos').appendRow([true, phone, action, link, comment, status, '', '', '', '']);
+const vrows = (env) => env.rows('Videos');
+
+test('setup creates the Videos tab with its dropdowns, the three Library tasks and the new settings', () => {
+  const env = load();
+  env.setup();
+  assert.ok(env.sheet('Videos'));
+  assert.equal(env.sheet('Videos').validations['2,3'].type, 'requireValueInList');
+  assert.equal(env.sheet('Videos').validations['2,1'].type, 'requireCheckbox');
+  const lib = env.rows('Library').map((r) => r.name);
+  for (const n of ['Like video', 'Comment on video', 'Like + comment on video']) assert.ok(lib.includes(n), n);
+  const keys = env.rows('Settings').map((r) => r.setting);
+  for (const k of ['comment_review', 'gemini_model', 'comment_min_confidence']) assert.ok(keys.includes(k), k);
+});
+
+test('drafting: Gemini watches the video; the draft waits for review; the key stays in a header', () => {
+  const env = videos([gemini(COMMENT_A)]);
+  addVideo(env, 'P1', 'like+comment', V1);
+  const res = env.call('draftVideos_', 3);
+  assert.equal(res.drafted, 1);
+  const [row] = vrows(env);
+  assert.equal(row.status, 'review_ready');
+  assert.equal(row.comment, COMMENT_A);
+  assert.ok(row.summary && row.drafted_at);
+  const f = env.state.fetches[0];
+  assert.match(f.url, /generativelanguage\.googleapis\.com\/v1beta\/models\/gemini-2\.5-flash:generateContent$/);
+  assert.doesNotMatch(f.url, new RegExp(KEY));                                  // never in the URL
+  assert.equal(f.opts.headers['x-goog-api-key'], KEY);
+  const body = JSON.parse(f.opts.payload);
+  assert.equal(body.contents[0].parts[0].file_data.file_uri, 'https://www.youtube.com/watch?v=u1Yjxw2Wg4Y');
+  assert.equal(body.generationConfig.responseMimeType, 'application/json');
+  assert.equal(body.generationConfig.mediaResolution, 'MEDIA_RESOLUTION_LOW');
+  assert.match(body.contents[0].parts[1].text, /Comment shape:/);
+});
+
+test('drafting: with comment_review off the draft is approved automatically (fully unattended)', () => {
+  const env = videos([gemini(COMMENT_A)]);
+  env.setSetting('comment_review', false);
+  addVideo(env, 'P1', 'comment', V1);
+  env.call('draftVideos_', 3);
+  assert.equal(vrows(env)[0].status, 'approved');
+});
+
+test('drafting: like-only rows and your own comments need no Gemini call', () => {
+  const env = videos();
+  addVideo(env, 'Watch 1', 'like', V1);
+  addVideo(env, 'P3', 'like+comment', V2, 'My own words about the pricing part of this video?');
+  env.call('draftVideos_', 3);
+  assert.equal(env.state.fetches.length, 0);
+  const [a, b] = vrows(env);
+  assert.equal(a.status, 'approved');
+  assert.equal(b.status, 'approved');
+  assert.equal(b.note, 'your own comment');
+});
+
+test('drafting: a missing key waits quietly (no calls, no error status) and works as soon as the key exists', () => {
+  const env = videos([gemini(COMMENT_A)]);
+  env.state.props.delete('GEMINI_API_KEY');
+  addVideo(env, 'P1', 'comment', V1);
+  const res = env.call('draftVideos_', 3);
+  assert.equal(res.waiting_for_key, 1);
+  assert.equal(env.state.fetches.length, 0);
+  assert.equal(vrows(env)[0].status, '');
+  assert.match(vrows(env)[0].note, /GEMINI_API_KEY/);
+  env.state.props.set('GEMINI_API_KEY', KEY);
+  env.call('draftVideos_', 3);
+  assert.equal(vrows(env)[0].status, 'review_ready');
+});
+
+test('drafting: unsafe, unsure, unusable and duplicate drafts are skipped, never commented', () => {
+  const env = videos([
+    gemini('', { safe_to_engage: false, summary: 'A tragic news story' }),
+    gemini(COMMENT_A, { confidence: 0.3 }),
+    gemini('too short'),
+    gemini(COMMENT_B),
+    gemini(COMMENT_B.toUpperCase() + '!!'),                                     // same text, different case/punctuation
+  ]);
+  for (let i = 0; i < 3; i++) addVideo(env, 'P1', 'comment', V1.replace('u1Yjxw2Wg4Y', 'u1Yjxw2Wg4' + i));
+  env.call('draftVideos_', 3);
+  deepEqual(vrows(env).map((r) => r.status), ['skipped', 'skipped', 'skipped']);
+  assert.match(vrows(env)[0].note, /would not comment/);
+  assert.match(vrows(env)[2].note, /not usable/);
+  addVideo(env, 'P2', 'comment', V2);
+  addVideo(env, 'P3', 'comment', V2);
+  env.call('draftVideos_', 3);
+  const r = vrows(env);
+  assert.equal(r[3].status, 'review_ready');
+  assert.equal(r[4].status, 'skipped');
+  assert.match(r[4].note, /repeated a comment/);
+});
+
+test('drafting: text is cleaned to plain ASCII without links, mentions or hashtags', () => {
+  const env = videos([gemini('Great point about the “pricing” tier — check https://x.io @bob #deal, is it worth it? \u{1F600}')]);
+  addVideo(env, 'P1', 'comment', V1);
+  env.call('draftVideos_', 3);
+  const c = vrows(env)[0].comment;
+  assert.match(c, /^[\x20-\x7E]+$/);
+  assert.doesNotMatch(c, /https?:|@|#/);
+  assert.match(c, /"pricing" tier - check/);
+});
+
+test('drafting: Gemini sees this account\'s recent comments and the other accounts\' comments on the same video', () => {
+  const env = videos([gemini(COMMENT_A), gemini(COMMENT_B)]);
+  addVideo(env, 'P1', 'comment', V1);
+  env.call('draftVideos_', 3);
+  addVideo(env, 'P2', 'comment', V1);
+  env.call('draftVideos_', 3);
+  const second = JSON.parse(env.state.fetches[1].opts.payload).contents[0].parts[1].text;
+  assert.ok(second.includes(COMMENT_A), 'the first account\'s comment is listed as already planned for this video');
+});
+
+test('drafting: a rate limit stops the run and retries later; a timeout is retried 3 times, then an error', () => {
+  const env = videos([{ status: 429, body: { error: { message: 'quota' } } }]);
+  addVideo(env, 'P1', 'comment', V1);
+  addVideo(env, 'P2', 'comment', V2);
+  env.call('draftVideos_', 3);
+  assert.equal(env.state.fetches.length, 1);                                   // stopped after the 429
+  assert.equal(vrows(env)[0].status, '');
+  assert.match(vrows(env)[0].note, /retry 1\/3/);
+  env.state.fetchHandler = () => { throw new Error('Timeout'); };
+  env.call('draftVideos_', 1);
+  env.call('draftVideos_', 1);
+  assert.equal(vrows(env)[0].status, 'error');
+  assert.match(vrows(env)[0].note, /Gemini failed/);
+});
+
+test('drafting: the API key never reaches the sheet, even when Gemini echoes it back in an error', () => {
+  const env = videos([{ status: 400, body: { error: { message: 'API key not valid: ' + KEY } } }]);
+  addVideo(env, 'P1', 'comment', V1);
+  env.call('draftVideos_', 3);
+  const everything = JSON.stringify(['Videos', 'Reports', 'Tasks', 'Settings'].map((n) => env.sheet(n).grid));
+  assert.ok(!everything.includes(KEY));
+});
+
+test('drafting: respects the per-run limit and the paused switch; bad rows get a clear error', () => {
+  const env = videos();
+  for (let i = 0; i < 5; i++) addVideo(env, 'P1', 'comment', V1.replace('u1Yjxw2Wg4Y', 'u1Yjxw2Wg' + i + 'Y'));
+  env.call('draftVideos_', 3);
+  assert.equal(env.state.fetches.length, 3);
+  assert.equal(vrows(env).filter((r) => r.status === 'review_ready').length, 3);
+  env.setSetting('paused', true);
+  assert.equal(env.call('draftVideosLocked_'), null);
+  assert.equal(env.state.fetches.length, 3);
+  const bad = videos();
+  addVideo(bad, 'P1', 'comment', 'not a link');
+  addVideo(bad, 'Watch 1', 'comment', V1);
+  addVideo(bad, 'P1', 'share', V1);
+  bad.call('draftVideos_', 3);
+  deepEqual(vrows(bad).map((r) => r.status), ['error', 'error', 'error']);
+  assert.match(vrows(bad)[1].note, /ONE phone/);
+});
+
+test('tick drafts videos without holding the script lock the runner needs', () => {
+  const env = videos([gemini(COMMENT_A)]);
+  addVideo(env, 'P1', 'comment', V1);
+  env.setSetting('enabled', false);
+  env.call('tick');
+  assert.equal(vrows(env)[0].status, 'review_ready');
+});
+
+test('queue: approved rows become one unified task each, with the comment in the value, and are stamped queued', () => {
+  const env = videos();
+  addVideo(env, 'P1', 'like+comment', V1, COMMENT_A, 'approved');
+  addVideo(env, 'P2', 'like', V2, '', 'approved');
+  addVideo(env, 'P3', 'comment', V2, COMMENT_B, 'review_ready');                // not approved yet: must not be queued
+  const res = env.post({ action: 'queue_videos' });
+  assert.equal(res.ok, true);
+  const tasks = taskRows(env);
+  deepEqual(tasks.map((t) => [t.phone, t.task, t.value]), [
+    ['P1', 'Like + comment on video', V1 + ' | ' + COMMENT_A],
+    ['P2', 'Like video', V2],
+  ]);
+  assert.equal(tasks[0].action, 'flow');
+  deepEqual(JSON.parse(tasks[0].params), { recipe: 'like_comment', spec: V1 + ' | ' + COMMENT_A });
+  const r = vrows(env);
+  assert.equal(r[0].status, 'queued');
+  assert.match(r[0].batch, /-videos-/);
+  assert.equal(r[2].status, 'review_ready');
+});
+
+test('queue: a like-only row on a group expands to every phone in the group', () => {
+  const env = videos();
+  addVideo(env, 'Watch 1', 'like', V1, '', 'approved');
+  env.post({ action: 'queue_videos' });
+  deepEqual(taskRows(env).map((t) => t.phone), ['P1', 'P2']);
+});
+
+test('queue: a phone never repeats a video, and the same comment text is never queued twice', () => {
+  const env = videos();
+  addVideo(env, 'P1', 'like+comment', V1, COMMENT_A, 'approved');
+  env.post({ action: 'queue_videos' });
+  addVideo(env, 'P1', 'like', V1, '', 'approved');                              // same phone, same video: a second Like would un-like
+  addVideo(env, 'P2', 'comment', V2, COMMENT_A.toLowerCase() + '!', 'approved'); // the same text, different punctuation
+  addVideo(env, 'P3', 'comment', V2, COMMENT_B, 'approved');
+  env.post({ action: 'queue_videos' });
+  const r = vrows(env);
+  assert.equal(r[1].status, 'held');
+  assert.match(r[1].note, /already did this video/);
+  assert.equal(r[2].status, 'held');
+  assert.match(r[2].note, /already used/);
+  assert.equal(r[3].status, 'queued');
+  assert.equal(taskRows(env).length, 2);
+});
+
+test('queue: two approved rows with the same text cannot both go out', () => {
+  const env = videos();
+  addVideo(env, 'P1', 'comment', V1, COMMENT_A, 'approved');
+  addVideo(env, 'P2', 'comment', V2, COMMENT_A, 'approved');
+  env.post({ action: 'queue_videos' });
+  deepEqual(vrows(env).map((r) => r.status), ['queued', 'held']);
+});
+
+test('queue: daily like and comment limits are enforced per phone from the Tasks history', () => {
+  const env = videos();
+  env.setSetting('max_likes_per_day', 1);
+  env.setSetting('max_comments_per_day', 1);
+  addVideo(env, 'P1', 'like+comment', V1, COMMENT_A, 'approved');
+  addVideo(env, 'P1', 'like+comment', V2, COMMENT_B, 'approved');
+  addVideo(env, 'P2', 'like+comment', V2, 'Which of the integrations needed the most setup time in the end?', 'approved');
+  env.post({ action: 'queue_videos' });
+  deepEqual(vrows(env).map((r) => r.status), ['queued', 'held', 'queued']);
+  assert.match(vrows(env)[1].note, /daily (like|comment) limit/);
+  env.setNow('2026-11-04T08:00:00Z');                                           // the next day the held row goes through
+  env.post({ action: 'queue_videos' });
+  assert.equal(vrows(env)[1].status, 'queued');
+});
+
+test('queue: the daily batch carries approved video rows along with the Routine', () => {
+  const env = videos();
+  env.addRoutine(true, 'P3', 'Open YouTube');
+  addVideo(env, 'P1', 'like', V1, '', 'approved');
+  env.setNow('2026-11-03T09:05:00Z');
+  env.call('tick');
+  const names = taskRows(env).map((t) => t.phone + ':' + t.task);
+  assert.ok(names.includes('P3:Open YouTube'));
+  assert.ok(names.includes('P1:Like video'));
+  assert.equal(vrows(env)[0].status, 'queued');
+  assert.equal(vrows(env)[0].batch, '2026-11-03');
+});
+
+test('queue: dry run changes nothing; pausing refuses; nothing approved says so', () => {
+  const env = videos();
+  addVideo(env, 'P1', 'like', V1, '', 'approved');
+  const dry = env.post({ action: 'queue_videos', dry_run: true });
+  assert.equal(dry.rows, 1);
+  assert.equal(taskRows(env).length, 0);
+  assert.equal(vrows(env)[0].status, 'approved');
+  env.setSetting('paused', true);
+  assert.equal(env.post({ action: 'queue_videos' }).error, 'paused');
+  env.setSetting('paused', false);
+  env.post({ action: 'queue_videos' });
+  assert.equal(env.post({ action: 'queue_videos' }).error, 'nothing_approved');
+});
+
+test('queue: a problem in the queue builder lands on the Videos row, not lost', () => {
+  const env = videos();
+  env.addPhone(false, 'Off', 'cloud', 'idoff');
+  addVideo(env, 'Off', 'like', V1, '', 'approved');
+  env.post({ action: 'queue_videos' });
+  assert.equal(vrows(env)[0].status, 'held');
+  assert.match(vrows(env)[0].note, /phone off/);
+});
+
+test('the queued tasks match what the runner expects (recipes expand to valid flows)', () => {
+  const env = videos();
+  addVideo(env, 'P1', 'like+comment', V1, COMMENT_A, 'approved');
+  env.post({ action: 'queue_videos' });
+  const t = taskRows(env)[0];
+  assert.equal(t.device, 'cloud:id1');
+  assert.ok(JSON.parse(t.params).spec.endsWith(COMMENT_A));
 });
