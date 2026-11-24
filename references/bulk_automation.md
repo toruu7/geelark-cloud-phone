@@ -155,8 +155,21 @@ How it works:
   Gemini watches the (public) video and drafts one; type your own and it is only checked.
 - Every 5-minute tick drafts up to 3 rows. Status runs `review_ready` -> `approved` -> `queued`. With `comment_review` ticked
   (default) you read the draft and set `approved`; untick it for fully unattended use.
-- Gemini skips a video it cannot understand or that is sensitive (`skipped`, reason in `note`). Drafts are plain ASCII, with no
-  links, mentions or hashtags, and avoid the wording of that account's recent comments and of other accounts' comments on the same video.
+- **What Gemini returns** (structured output, so it is always parseable): a summary, a `safe_to_engage` flag, a confidence, one
+  `evidence` sentence naming the moment of the video the comments are based on (with a timestamp: check it against the video),
+  and three candidate comments in three different shapes (specific question / opinion + question / follow-up request /
+  comparison question). The best candidate that passes the checks goes in `comment`, the others in `alternatives`.
+- **Every candidate is checked again in the script**, whatever the prompt asked for: plain ASCII with no links, mentions or
+  hashtags; no generic praise ("great video"); no promotion or engagement bait; no invented personal experience ("I switched to
+  ..."); not a repeat of an existing comment (other drafts, the task history, real comments on the video). A video Gemini cannot
+  understand, or that is sensitive, or with no evidence, is `skipped` with the reason in `note`.
+- Optional: add the Script property `YOUTUBE_API_KEY` (YouTube Data API v3) and the video's top real comments are read as a
+  style reference and to avoid repeating them. They are passed to Gemini as untrusted data, never as instructions. Without the
+  key, or if comments are off, drafting works the same.
+- A Videos tab from an older layout gains the new columns by itself.
+- **Try it for real before deploying**: `tests/live_gemini_check.js` runs the same drafting code against the real Gemini API and
+  prints what would appear on the Videos tab (nothing is written or posted). Set the key at a prompt, never in a file:
+  `$env:GEMINI_API_KEY = Read-Host "Gemini API key"` then `node tests/live_gemini_check.js https://youtu.be/VIDEO_ID`.
 - Approved rows are queued with the daily batch (or on demand: menu **Queue approved Videos rows AND start the cloud routine** - it holds every other pending task back so only these run - or **Queue approved rows on the Videos tab**, or the
   `queue_videos` web action). Each becomes one `Like video` / `Comment on video` / `Like + comment on video` task.
 - **Queue-time rules, read from the Tasks history** (so they hold when the runner keeps no files): a phone never repeats a video,
