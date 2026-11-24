@@ -67,9 +67,21 @@ class TestOperatorSkill(unittest.TestCase):
         self.assertIn("unattended", fm["description"])
 
     def test_safety_rules_stay_in_place(self):
-        for phrase in ("never ask for confirmation", "Never like, follow", "Never print", "Run the runner **once**",
+        for phrase in ("never ask for confirmation", "Never print", "Run the runner **once**",
                        "every phone stopped", "may still be billing"):
             self.assertIn(phrase, self.text, phrase)
+
+    def test_the_agent_never_engages_by_hand_and_the_exception_stays_narrow(self):
+        # The agent itself never likes/comments/buys/logs in, and never by hand through the phone skill. The ONLY exception is
+        # the runner carrying out tasks the user queued in the sheet, which the agent never adds, edits or retries.
+        for phrase in ("You yourself never like, follow, subscribe, comment", "by hand through the phone skill",
+                       "the runner carries out the tasks the user queued in their own sheet",
+                       "Never add, edit, re-run or retry them", "a login, a purchase, a permission, credentials"):
+            self.assertIn(phrase, self.text, phrase)
+        prompt = read("deploy", "claude-routine", "prompt.txt")
+        for phrase in ("you yourself never like", "buy, log in or approve anything on a phone", "by hand through the phone skill",
+                       "you never add, edit or retry them"):
+            self.assertIn(phrase, prompt, phrase)
 
     def test_references_real_commands(self):
         for cmd in ("bulk-run --only-cloud --probe", "bulk-run --only-cloud", "bulk-cloud-stop", "geelark_adb.py up --id",
