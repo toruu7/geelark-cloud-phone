@@ -10,7 +10,7 @@ You are running **unattended**: nobody can answer questions, so never ask for co
 The plan (which phones, which tasks, in what order, limits, pause switch) lives in the Google Sheet. The runner reads it. You do not decide what the phones do.
 
 ## Hard rules
-- Never like, follow, subscribe, comment, post, message, buy, log in, approve permissions or enter any credentials. If a screen asks for any of these, leave it and report it.
+- You yourself never like, follow, subscribe, comment, post, message, buy, log in, approve permissions or enter any credentials, and you never do any of that by hand through the phone skill. The one exception is not an action of yours: the runner carries out the tasks the user queued in their own sheet, which can include the `Like video`, `Comment on video` and `Like + comment on video` tasks. Running the plan means running those too. Never add, edit, re-run or retry them. If a screen asks for anything else (a login, a purchase, a permission, credentials), leave it and report it.
 - Never print, log, or paste the value of `GEELARK_API_TOKEN`, `GEELARK_SHEETS_URL` or `GEELARK_SHEETS_SECRET`. Check only whether they are set.
 - Run the runner **once**. Never loop or re-run it; the sheet owns retries.
 - Use only the commands below. Do not edit files, open pull requests, or touch anything outside this task.
