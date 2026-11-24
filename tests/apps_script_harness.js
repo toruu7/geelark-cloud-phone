@@ -161,7 +161,7 @@ function load(options = {}) {
     LockService: { getScriptLock: () => ({ waitLock() {}, tryLock: () => true, releaseLock() {} }),
                    getDocumentLock: () => ({ tryLock: () => true, releaseLock() {} }) },
     ContentService: { MimeType: { JSON: 'json' }, createTextOutput: (s) => ({ getContent: () => s, setMimeType() { return this; } }) },
-    Utilities: { formatDate: (d, tz, p) => fmtDate(d, tz, p) },
+    Utilities: { formatDate: (d, tz, p) => fmtDate(d, tz, p), sleep: (ms) => { state.slept = (state.slept || 0) + ms; } },
     ScriptApp: {
       getProjectTriggers: () => state.triggers.map((fn) => ({ getHandlerFunction: () => fn })),
       deleteTrigger: (t) => { const i = state.triggers.indexOf(t.getHandlerFunction()); if (i >= 0) state.triggers.splice(i, 1); },

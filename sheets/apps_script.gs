@@ -77,7 +77,7 @@ var DEFAULT_SETTINGS = [
   ['tap_jitter_pct', '', 'Account safety: every tap lands up to this percent of the screen off the exact spot (max 3). Blank/0 = exact.'],
   ['phone_start_stagger_s', '', 'Account safety: each phone starts at a random moment up to this many seconds after the run begins. Blank/0 = start at once.'],
   ['comment_review', 'TRUE', 'Videos tab: tick = Gemini drafts wait for you to set status to approved. Untick = drafts are approved automatically (fully unattended).'],
-  ['gemini_model', 'gemini-2.5-flash', 'Videos tab: the Gemini model that watches each video and drafts the comment. The API key goes in Script properties as GEMINI_API_KEY, never here.'],
+  ['gemini_model', 'gemini-3.8-flash', 'Videos tab: the Gemini model that watches each video and drafts the comment. Models get retired: if a row says "no longer available", paste the model name Gemini suggests here. The API key goes in Script properties as GEMINI_API_KEY, never here.'],
   ['comment_min_confidence', '0.6', 'Videos tab: Gemini must be at least this sure (0-1) that it understood the video, or the row is skipped instead of commented.']
 ];
 
@@ -886,6 +886,7 @@ function onOpen() {
     .addItem('Preview what the routine will queue', 'menuPreview')
     .addItem('Queue ticked rows on the Manual tab', 'menuQueueManual')
     .addItem('Draft comments for the Videos tab now', 'menuDraftVideos')
+    .addItem('List the Gemini models my key can use', 'menuListGeminiModels')
     .addItem('Queue approved rows on the Videos tab', 'menuQueueVideos')
     .addItem('Queue approved Videos rows AND start the cloud routine', 'menuQueueVideosAndRun')
     .addItem('Queue ticked rows AND start the cloud routine', 'menuQueueAndRun')
@@ -1183,9 +1184,10 @@ function out_(obj) {
 var VIDEO_TASKS = { like: 'Like video', comment: 'Comment on video', like_comment: 'Like + comment on video' };
 var MAX_DRAFTS_PER_RUN = 3;          // one Gemini call can take a minute; Apps Script stops a run after 6 minutes
 var DRAFT_TRIES = 3;                 // a call that times out is retried on later ticks, then the row becomes an error
+var DRAFT_TRIES_BUSY = 8;            // "high demand" (503) and rate limits (429) get more patience
 var COMMENT_MIN_CHARS = 20;
 var COMMENT_MAX_DEFAULT = 150;
-var DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
+var DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';      // Gemini's own error named this when 2.5-flash was retired; override in Settings
 var YT_ID_RE_ = /(?:youtu\.be\/|[?&]v=|\/shorts\/|\/embed\/)([A-Za-z0-9_-]{11})/;
 var COMMENT_SHAPES = [
   'a specific question about one concrete thing in the video',
@@ -1304,12 +1306,18 @@ function geminiDraft_(videoUrl, ctx, map) {
     contents: [{ parts: [{ file_data: { file_uri: videoUrl } }, { text: prompt }] }],
     generationConfig: { responseMimeType: 'application/json', responseSchema: GEMINI_SCHEMA, temperature: 0.9, mediaResolution: 'MEDIA_RESOLUTION_LOW' }
   };
-  var resp;
-  try {
-    resp = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent', {
-      method: 'post', contentType: 'application/json', headers: { 'x-goog-api-key': key }, payload: JSON.stringify(body), muteHttpExceptions: true });
-  } catch (err) {
-    return { ok: false, error: 'request_failed', retry: true, detail: clip_(scrub_(err, key)) };
+  var resp, attempt = 0;
+  for (;;) {
+    try {
+      resp = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent', {
+        method: 'post', contentType: 'application/json', headers: { 'x-goog-api-key': key }, payload: JSON.stringify(body), muteHttpExceptions: true });
+    } catch (err) {
+      return { ok: false, error: 'request_failed', retry: true, detail: clip_(scrub_(err, key)) };
+    }
+    // "high demand" (503) and brief gateway errors usually clear within seconds: try again twice, with a short wait, before this
+    // tick gives up on the row (the next tick tries again; after DRAFT_TRIES failed ticks it becomes an error).
+    if ([500, 502, 503, 504].indexOf(resp.getResponseCode()) >= 0 && attempt < 2) { attempt++; Utilities.sleep(6000 * attempt); continue; }
+    break;
   }
   var code = resp.getResponseCode(), text = resp.getContentText(), data = null;
   try { data = JSON.parse(text); } catch (e) { /* not JSON */ }
@@ -1467,9 +1475,11 @@ function draftVideos_(limit) {
     var res = geminiDraft_('https://www.youtube.com/watch?v=' + id,
       { recent: hist.recent, others: hist.others, real: real, shapes: pickShapes_() }, map);
     if (!res.ok) {
-      var tries = Number((/^retry (\d)\//.exec(String(r.note)) || [0, 0])[1]) + 1;
-      if (res.retry && tries < DRAFT_TRIES) {
-        setCells_(t, r, { note: 'retry ' + tries + '/' + DRAFT_TRIES + ': ' + res.error + (res.detail ? ' ' + res.detail : '') });
+      var tries = Number((/^retry (\d+)\//.exec(String(r.note)) || [0, 0])[1]) + 1;
+      // a demand spike (503) or a rate limit (429) is temporary: be patient (8 ticks, about 40 minutes); a timeout or a bad answer is not
+      var allowed = (res.error === 'http_503' || res.error === 'http_429') ? DRAFT_TRIES_BUSY : DRAFT_TRIES;
+      if (res.retry && tries < allowed) {
+        setCells_(t, r, { note: 'retry ' + tries + '/' + allowed + ': ' + res.error + (res.detail ? ' ' + res.detail : '') });
         out.retry_later++;
         if (res.error === 'http_429') break;                        // rate limited: stop for this run
         continue;
@@ -1650,6 +1660,37 @@ function menuQueueVideosAndRun() {
   } else {
     ui.alert('Not queued', String(res.error), ui.ButtonSet.OK);
   }
+}
+
+// The models this API key can use for generateContent (names only), for picking the gemini_model setting when one is retired or busy.
+function geminiModels_() {
+  var key = String(PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY') || '').trim();
+  if (!key) return { ok: false, error: 'no_key' };
+  var resp;
+  try {
+    resp = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=100', { method: 'get', headers: { 'x-goog-api-key': key }, muteHttpExceptions: true });
+  } catch (err) {
+    return { ok: false, error: 'request_failed', detail: clip_(scrub_(err, key)) };
+  }
+  var code = resp.getResponseCode(), data = null;
+  try { data = JSON.parse(resp.getContentText()); } catch (e) { /* not JSON */ }
+  if (code !== 200 || !data) return { ok: false, error: 'http_' + code, detail: clip_(scrub_(data && data.error && data.error.message || '', key)) };
+  var names = (data.models || []).filter(function (m) { return (m.supportedGenerationMethods || []).indexOf('generateContent') >= 0; })
+    .map(function (m) { return String(m.name || '').replace(/^models\//, ''); }).filter(function (n) { return /^gemini/.test(n); }).sort();
+  return { ok: true, names: names };
+}
+
+function menuListGeminiModels() {
+  var ui = SpreadsheetApp.getUi();
+  var r = geminiModels_();
+  var current = String(settingsMap_().gemini_model || DEFAULT_GEMINI_MODEL);
+  if (!r.ok) {
+    ui.alert('Gemini models', r.error === 'no_key' ? 'Add the Script property GEMINI_API_KEY first (Project Settings > Script properties).' :
+      'Could not list the models (' + r.error + ').' + (r.detail ? '\n' + r.detail : ''), ui.ButtonSet.OK);
+    return;
+  }
+  ui.alert('Gemini models your key can use', 'Current setting (Settings > gemini_model): ' + current + '\n\n' + r.names.slice(0, 60).join('\n') +
+    '\n\nPick one with "flash" in the name for speed and cost, paste it into the gemini_model setting, then clear the status and note of any Videos row that errored.', ui.ButtonSet.OK);
 }
 
 function menuDraftVideos() {

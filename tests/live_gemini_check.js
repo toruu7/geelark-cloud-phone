@@ -10,7 +10,7 @@
 //   node tests/live_gemini_check.js https://youtu.be/VIDEO_ID [https://youtu.be/OTHER_ID ...]
 // Optional, to also read the video's real comments as a style reference (YouTube Data API v3 key):
 //   $env:YOUTUBE_API_KEY = Read-Host "YouTube Data API key"
-// Optional: $env:GEMINI_MODEL = "gemini-2.5-flash"   (defaults to the model in the sheet's settings)
+// Optional: $env:GEMINI_MODEL = "gemini-3.8-flash"   (defaults to the model in the sheet's settings)
 //
 // Needs Node 18+ and curl (built into Windows 10/11). Each video is a real, billed Gemini call.
 
@@ -46,7 +46,7 @@ if (process.env.GEMINI_MODEL) env.setSetting('gemini_model', process.env.GEMINI_
 env.ctx.UrlFetchApp = { fetch: realFetch };
 links.forEach((link, i) => env.sheet('Videos').appendRow([true, 'P' + (i + 1), 'comment', link, '', '', '', '', '', '', '', '']));
 
-console.log(`Drafting ${links.length} video(s) with the real Gemini API (model: ${process.env.GEMINI_MODEL || 'from the sheet settings, default gemini-2.5-flash'})` +
+console.log(`Drafting ${links.length} video(s) with the real Gemini API (model: ${process.env.GEMINI_MODEL || 'from the sheet settings, default gemini-3.8-flash'})` +
   (process.env.YOUTUBE_API_KEY ? ', reading real comments as style reference' : '') + '...\n');
 const started = Date.now();
 const res = env.call('draftVideos_', 99);

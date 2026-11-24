@@ -980,7 +980,7 @@ test('drafting: Gemini watches the video; the draft waits for review; the key st
   assert.equal(row.comment, COMMENT_A);
   assert.ok(row.summary && row.drafted_at);
   const f = env.state.fetches[0];
-  assert.match(f.url, /generativelanguage\.googleapis\.com\/v1beta\/models\/gemini-2\.5-flash:generateContent$/);
+  assert.match(f.url, /generativelanguage\.googleapis\.com\/v1beta\/models\/gemini-3\.8-flash:generateContent$/);
   assert.doesNotMatch(f.url, new RegExp(KEY));                                  // never in the URL
   assert.equal(f.opts.headers['x-goog-api-key'], KEY);
   const body = JSON.parse(f.opts.payload);
@@ -1205,12 +1205,74 @@ test('drafting: a rate limit stops the run and retries later; a timeout is retri
   env.call('draftVideos_', 3);
   assert.equal(env.state.fetches.length, 1);                                   // stopped after the 429
   assert.equal(vrows(env)[0].status, '');
-  assert.match(vrows(env)[0].note, /retry 1\/3/);
+  assert.match(vrows(env)[0].note, /retry 1\/8: http_429/);                      // a rate limit gets the longer patience
   env.state.fetchHandler = () => { throw new Error('Timeout'); };
+  env.sheet('Videos').set(2, 8, '');                                              // a timeout starts counting from scratch: 3 tries
   env.call('draftVideos_', 1);
   env.call('draftVideos_', 1);
+  env.call('draftVideos_', 1);                                                    // third failed try: a timeout gives up
   assert.equal(vrows(env)[0].status, 'error');
   assert.match(vrows(env)[0].note, /Gemini failed/);
+});
+
+test('drafting: a short "high demand" (503) is retried inside the same run; a lasting one waits for the next tick', () => {
+  const busy = { status: 503, body: { error: { message: 'This model is currently experiencing high demand.' } } };
+  const env = videos([busy, busy, gemini(COMMENT_A)]);                           // two busy answers, then it works
+  addVideo(env, 'P1', 'comment', V1);
+  env.call('draftVideos_', 3);
+  assert.equal(geminiCalls(env).length, 3);
+  assert.equal(vrows(env)[0].status, 'review_ready');
+  assert.ok(env.state.slept > 0, 'it waited between attempts');
+  const down = videos([busy, busy, busy, busy, busy, busy]);                     // busy for a long time
+  addVideo(down, 'P1', 'comment', V1);
+  down.call('draftVideos_', 3);
+  assert.equal(geminiCalls(down).length, 3);                                     // three tries in this run, no more
+  assert.equal(vrows(down)[0].status, '');                                       // still waiting, not an error yet
+  assert.match(vrows(down)[0].note, /retry 1\/8: http_503/);
+});
+
+test('drafting: a long demand spike is waited out over many ticks (8), then it becomes an error; timeouts still give up after 3', () => {
+  const busy = { status: 503, body: { error: { message: 'high demand' } } };
+  const env = videos();
+  env.state.fetchHandler = () => busy;
+  addVideo(env, 'P1', 'comment', V1);
+  for (let tick = 1; tick <= 7; tick++) {
+    env.call('draftVideos_', 3);
+    assert.equal(vrows(env)[0].status, '', 'tick ' + tick);
+    assert.match(vrows(env)[0].note, new RegExp('retry ' + tick + '/8: http_503'));
+  }
+  env.call('draftVideos_', 3);                                                    // the 8th failed tick
+  assert.equal(vrows(env)[0].status, 'error');
+  assert.match(vrows(env)[0].note, /Gemini failed \(http_503\)/);
+});
+
+test('geminiModels_: lists only the gemini models that can generate content, sorted, without the models/ prefix', () => {
+  const env = videos();
+  env.state.fetchHandler = () => ({ status: 200, body: { models: [
+    { name: 'models/gemini-3.8-flash', supportedGenerationMethods: ['generateContent', 'countTokens'] },
+    { name: 'models/gemini-3.8-pro', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/text-embedding-9', supportedGenerationMethods: ['embedContent'] },
+    { name: 'models/gemini-embedding-1', supportedGenerationMethods: ['embedContent'] },
+    { name: 'models/gemma-3', supportedGenerationMethods: ['generateContent'] },
+  ] } });
+  const r = env.call('geminiModels_');
+  assert.equal(r.ok, true);
+  deepEqual(r.names, ['gemini-3.8-flash', 'gemini-3.8-pro']);
+  assert.equal(env.state.fetches[0].opts.headers['x-goog-api-key'], KEY);
+  assert.doesNotMatch(env.state.fetches[0].url, new RegExp(KEY));
+});
+
+test('geminiModels_: no key, an API error, and a key echoed in an error are all handled', () => {
+  const none = videos();
+  none.state.props.delete('GEMINI_API_KEY');
+  assert.equal(none.call('geminiModels_').error, 'no_key');
+  assert.equal(none.state.fetches.length, 0);
+  const bad = videos();
+  bad.state.fetchHandler = () => ({ status: 400, body: { error: { message: 'API key not valid: ' + KEY } } });
+  const r = bad.call('geminiModels_');
+  assert.equal(r.ok, false);
+  assert.equal(r.error, 'http_400');
+  assert.ok(!JSON.stringify(r).includes(KEY));
 });
 
 test('drafting: the API key never reaches the sheet, even when Gemini echoes it back in an error', () => {
