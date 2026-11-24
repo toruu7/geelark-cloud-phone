@@ -163,3 +163,17 @@ How it works:
   the same comment text is never queued twice, and `max_likes_per_day` / `max_comments_per_day` are enforced per phone per day.
   A row that is held says why in `note` and is retried on the next queue.
 - Random timing on a remote runner comes from the Settings tab (`phone_start_stagger_s`, `wait_jitter_pct`, `tap_jitter_pct`).
+
+### Verified like/comment steps (outcome checks)
+
+The like and comment recipes no longer count a tap as success. They read the screenshot (`scripts/gl_pixels.py`, standard library
+only, resolution-independent) and check what happened:
+- `clear-ads` taps Skip until the normal watch page is really showing; if it never does it fails, tapping nothing else.
+- `tap-like` taps only on the watch page, never when the video is already liked (a second tap would un-like), then confirms the
+  thumb filled. It never taps twice.
+- `send-comment` finds the red Send arrow where it really is (it moves when a long comment makes the box taller), sends nothing if
+  the arrow is not there, and confirms the comment went because the arrow disappears. It waits for a slow post and retries once.
+- If a screenshot cannot be taken or read, each step falls back to the old blind tap and says "could not read the screen" in its
+  message, so an unconfirmed result is never reported as confirmed.
+- A recipe runs as one task with a 600 s limit (the sheet's per-task timeout does not apply to it).
+Tests use real screenshots shrunk to a quarter size in `tests/fixtures/pixels/`.

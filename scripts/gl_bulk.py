@@ -23,6 +23,7 @@ import gl_base
 import gl_cloud
 import gl_cloudadb
 import gl_costs
+import gl_pixels
 import gl_sheets
 import gl_transport
 
@@ -906,15 +907,17 @@ def recipe_steps(p):
         _v_type({"text": comment})                     # printable ASCII only
     tap = lambda xy, **kw: dict({"action": "tap", "x": xy[0], "y": xy[1]}, **kw)
     wait = lambda s: {"action": "sleep", "seconds": s}
+    # clear-ads keeps tapping Skip until the normal watch page is really showing, and fails (tapping nothing else) if it
+    # never does. tap-like and send-comment look at the screen before and after, so a step only counts when it worked.
     steps = [{"action": "deep-link", "url": "https://www.youtube.com/watch?v=" + m.group(1),
               "package": "com.google.android.youtube"},
-             wait(12), tap(_TAP_SKIP), wait(10), tap(_TAP_SKIP), wait(10), tap(_TAP_SKIP), wait(10)]   # clear an ad pod
+             wait(12), {"action": "clear-ads", "max_rounds": 6, "gap_s": 8}]
     if recipe in ("like", "like_comment"):
-        steps += [tap(_TAP_LIKE, engage="like"), wait(3), {"action": "screenshot"}]                      # proof: thumb filled
+        steps += [{"action": "tap-like", "engage": "like"}, wait(3), {"action": "screenshot"}]            # proof: thumb filled
     if recipe in ("comment", "like_comment"):
         steps += [tap(_TAP_COMMENT_BOX, engage="comment_open"), wait(3),
                   {"action": "type", "text": comment, "engage": "comment_type"}, wait(2),
-                  tap(_TAP_SEND, engage="comment_send"), wait(6), {"action": "screenshot"}]               # proof: composer closed
+                  {"action": "send-comment", "retries": 1, "engage": "comment_send"}, {"action": "screenshot"}]   # proof
         # No "Newest" tap here. With the comments panel closed that spot is the Subscribe button, and a batch did
         # subscribe a phone to a channel that way. Posted comments are checked separately, looking before any tap.
     steps.append({"action": "force-stop", "name": "youtube"})
@@ -984,6 +987,121 @@ def _r_flow(ctx, p):
     return ok(f"{done} steps completed{note}", results)
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# Verified YouTube steps. They read the screenshot (see gl_pixels.py) instead of tapping blind. If a screenshot cannot be taken
+# or decoded they fall back to the old blind tap and say so in their message ("could not read the screen").
+# ---------------------------------------------------------------------------------------------------------------
+def _look(ctx):
+    """The current screen decoded for the pixel probes, or None when it cannot be captured or read."""
+    try:
+        res = ctx.transport.screenshot()
+    except Exception:
+        return None
+    if res.get("returncode") != 0 or not res.get("stdout"):
+        return None
+    return gl_pixels.decode_png(res["stdout"])
+
+
+def _do_tap(ctx, x, y):
+    return ACTIONS["tap"]["run"](ctx, {"x": x, "y": y})
+
+
+def _v_none(p):
+    pass
+
+
+def _v_clear_ads(p):
+    _num(p, "max_rounds", 1, 12, 6)
+    _num(p, "gap_s", 2, 20, 8)
+
+
+def _r_clear_ads(ctx, p):
+    """Tap Skip until the normal watch page shows (the grey Comments card is visible). Fails if it never does."""
+    rounds, gap, taps = int(_num(p, "max_rounds", 1, 12, 6)), _num(p, "gap_s", 2, 20, 8), 0
+    for i in range(rounds + 1):
+        img = _look(ctx)
+        if img is None:                                    # cannot look: the old fixed sequence, honestly labelled
+            for _ in range(min(3, rounds)):
+                hit = _do_tap(ctx, *_TAP_SKIP)
+                if hit["status"] != "success":
+                    return hit
+                ctx.wait(10)
+            return ok("could not read the screen: tapped Skip 3 times blindly (not verified)")
+        if gl_pixels.watch_page_ready(img):
+            return ok(f"watch page ready after {taps} Skip tap(s)")
+        if i == rounds:
+            break
+        hit = _do_tap(ctx, *_TAP_SKIP)
+        if hit["status"] != "success":
+            return hit
+        taps += 1
+        _r_sleep(ctx, {"seconds": gap})
+    return fail(f"the watch page did not appear after {taps} Skip tap(s): an ad or an error screen is still covering it")
+
+
+def _r_tap_like(ctx, p):
+    """Tap Like once, only on the watch page and only if the video is not already liked, then confirm the thumb filled.
+    Never taps twice: a second tap would un-like."""
+    before = _look(ctx)
+    if before is not None:
+        if not gl_pixels.watch_page_ready(before):
+            return fail("the watch page is not showing (an ad or another screen is on top): did not tap Like")
+        if gl_pixels.like_state(before) == "filled":
+            return ok("already liked, so Like was not tapped (a second tap would un-like)")
+    hit = _do_tap(ctx, *_TAP_LIKE)
+    if hit["status"] != "success":
+        return hit
+    _r_sleep(ctx, {"seconds": 4})
+    after = _look(ctx)
+    if before is None or after is None:
+        return ok("tapped Like (could not read the screen to confirm)")
+    state = gl_pixels.like_state(after)
+    if state == "outline":                                  # maybe just slow: look once more before calling it
+        _r_sleep(ctx, {"seconds": 4})
+        again = _look(ctx)
+        state = gl_pixels.like_state(again) if again is not None else "unknown"
+    if state == "filled":
+        return ok("like confirmed (the thumb is filled)")
+    if state == "outline":
+        return fail("Like was tapped but the thumb is still empty (not signed in, or the button moved)")
+    return ok("tapped Like (the screen was unclear, so it is not confirmed)")
+
+
+def _v_send_comment(p):
+    _num(p, "retries", 0, 2, 1)
+
+
+def _r_send_comment(ctx, p):
+    """Find the red Send arrow on screen, tap exactly there, and confirm the comment went (the arrow disappears). Sends nothing
+    if the arrow is not visible (the box did not open or nothing was typed). A retry is safe: an unsent draft cannot double-post,
+    and the check waits for a slow post before it retries."""
+    retries = int(_num(p, "retries", 0, 2, 1))
+    img = _look(ctx)
+    if img is None:
+        hit = _do_tap(ctx, *_TAP_SEND)
+        if hit["status"] != "success":
+            return hit
+        _r_sleep(ctx, {"seconds": 6})
+        return ok("tapped Send at the usual spot (could not read the screen to confirm)")
+    blob = gl_pixels.red_blob(img)
+    if blob is None:
+        return fail("the Send arrow is not visible: the comment box did not open or nothing was typed. Nothing was sent")
+    for attempt in range(retries + 1):
+        hit = _do_tap(ctx, blob[0], blob[1])
+        if hit["status"] != "success":
+            return hit
+        for wait_s in (6, 5):                               # a slow post gets time before it counts as failed
+            _r_sleep(ctx, {"seconds": wait_s})
+            img = _look(ctx)
+            if img is None:
+                return ok("tapped Send (could not read the screen to confirm)")
+            now = gl_pixels.red_blob(img)
+            if now is None:
+                return ok("comment sent (the Send arrow is gone)" + (f" after {attempt} retry" if attempt else ""))
+        blob = now
+    return fail("the comment is still in the box after Send, so it was not posted")
+
+
 ACTIONS = {
     "open-app": {"validate": _v_open_app, "run": _r_open_app},
     "force-stop": {"validate": _v_force_stop, "run": _r_force_stop},
@@ -1000,7 +1118,12 @@ ACTIONS = {
     "check-device": {"validate": _v_check, "run": _r_check},
     "description-link": {"validate": _v_description_link, "run": _r_description_link},
     "webhook": {"validate": _v_webhook, "run": _r_webhook, "timeout": lambda p: _num(p, "max_wait_s", 30, 3600, 600) + 60},
-    "flow": {"validate": _v_flow, "run": _r_flow},
+    "clear-ads": {"validate": _v_clear_ads, "run": _r_clear_ads},
+    "tap-like": {"validate": _v_none, "run": _r_tap_like},
+    "send-comment": {"validate": _v_send_comment, "run": _r_send_comment},
+    # a like/comment recipe runs boot-to-finish as ONE task (about 3-5 minutes with ads), so it gets a longer limit than the
+    # sheet's per-task timeout (the phone-minute caps still apply between tasks)
+    "flow": {"validate": _v_flow, "run": _r_flow, "timeout": lambda p: 600 if p.get("recipe") else 0},
 }
 
 

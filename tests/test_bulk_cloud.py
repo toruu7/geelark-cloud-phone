@@ -252,8 +252,9 @@ class TestCloudCliAndSheet(unittest.TestCase):
 
     def test_cli_bulk_cloud_stop_with_nothing_to_stop(self):
         with tempfile.TemporaryDirectory() as d:
+            env = {k: v for k, v in os.environ.items() if not k.startswith("GEELARK_SHEETS")}   # never talk to a real sheet
             out = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "geelark.py"), "bulk-cloud-stop", "--log-dir", d],
-                                 capture_output=True, text=True, timeout=60)
+                                 capture_output=True, text=True, env=env, timeout=60)
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertEqual(json.loads(out.stdout)["stopped"], [])
 

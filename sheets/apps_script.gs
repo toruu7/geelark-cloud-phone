@@ -42,7 +42,8 @@ var HEADERS = {
 
 // Must match the runner's actions (scripts/gl_bulk.py ACTIONS); a test keeps the two lists in sync.
 var ALLOWED_ACTIONS = ['open-app', 'force-stop', 'deep-link', 'key', 'tap', 'swipe', 'type', 'sleep', 'screenshot',
-                       'click-text', 'wait-text', 'assert-text', 'check-device', 'description-link', 'webhook', 'flow'];
+                       'click-text', 'wait-text', 'assert-text', 'check-device', 'description-link', 'webhook', 'flow',
+                       'clear-ads', 'tap-like', 'send-comment'];
 
 var STALE_MINUTES = 15;        // a task stuck in "running" longer than this is handed out again
 var CELL_LIMIT = 2000;         // keep cells small; full detail lives in the runner's local JSONL log
