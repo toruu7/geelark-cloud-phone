@@ -2,10 +2,10 @@
 # Paste this into the cloud environment's "Setup script". It runs before the agent starts and installs the runner
 # at a pinned commit, so the agent only RUNS code that was already in place; it never downloads and executes code
 # itself (which the cloud permission classifier blocks). To update the runner: change REF, save the environment.
-# setup-version: 12 (pins the runner to REF; bump this number to force the cloud to re-run the script)
+# setup-version: 13 (pins the runner to REF; bump this number to force the cloud to re-run the script)
 set -euo pipefail
 REPO=https://github.com/toruu7/geelark-cloud-phone
-REF=b96a5341d36eb3566236555ebf7a9293fc0c384b
+REF=39a17a8630755a7f74177f8703d4c1d65c770be5
 DEST=/opt/geelark
 rm -rf "$DEST"
 git clone --quiet "$REPO" "$DEST"
