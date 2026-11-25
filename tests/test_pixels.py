@@ -62,6 +62,13 @@ class TestProbes(unittest.TestCase):
         for name in ("ad_panel", "ad_panel_2", "comments_panel", "composer_typed", "composer_empty", "composer_closed", "signin_prompt"):
             self.assertFalse(P.watch_page_ready(img(name)), name)
 
+    def test_basic_watch_check_accepts_a_featured_comment_but_still_rejects_ads_and_errors(self):
+        for name in ("watch_outline", "watch_liked", "watch_liked_bell", "watch_featured_comment"):
+            self.assertTrue(P.watch_page_basic(img(name)), name)
+        for name in ("ad_panel", "ad_panel_2", "ad_panel_3", "ad_center", "offline", "comments_panel", "composer_typed", "signin_prompt"):
+            self.assertFalse(P.watch_page_basic(img(name)), name)
+        self.assertFalse(P.watch_page_ready(img("watch_featured_comment")))     # the strict check wants the 'Add a comment' pill
+
     def test_like_state_filled_outline_and_unknown_off_the_watch_page(self):
         self.assertEqual(P.like_state(img("watch_outline")), "outline")
         self.assertEqual(P.like_state(img("watch_liked")), "filled")

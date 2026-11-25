@@ -191,7 +191,62 @@ def watch_page_ready(img):
     return near(card, (242, 242, 242), 7) and near(pill, (229, 229, 229), 9) and near(page, (255, 255, 255), 6)
 
 
+def watch_page_basic(img):
+    """Looser than watch_page_ready: the grey Comments card sits under the player and white page below it, with no check of what
+    is inside the card. Some videos show a featured comment there instead of the 'Add a comment' pill, which fails the strict
+    check. An ad panel, My Ad Center or an error page has no grey card at that height, so it is still told apart."""
+    card = img.at(0.5, 0.505)
+    page = img.at(0.5, 0.62)
+    near = lambda p, ref, tol: all(abs(p[i] - ref[i]) <= tol for i in range(3))
+    above, margin = img.at(0.5, 0.48), img.at(0.03, 0.52)      # the card has white above it and a white margin at its left
+    return (near(card, (242, 242, 242), 7) and near(page, (255, 255, 255), 6)
+            and near(above, (255, 255, 255), 6) and near(margin, (255, 255, 255), 6))
+
+
 # Calibrated on real 720x1440 screenshots from 7 different videos: the outline thumb measures 0.138 every time and the filled
 # thumb 0.236 every time, so the cut-offs sit in between with a gap that answers "unknown" (see tests/test_pixels.py).
 LIKE_FILLED_MIN = 0.21
 LIKE_OUTLINE_MAX = 0.165
+
+
+# --- the video description sheet (used by the description-link task) -----------------------------------------------------
+# Calibrated on a real 720x1440 screenshot: the description box is #E4EFFB and link text is exactly #065FD4.
+DESC_BOX = (228, 239, 251)
+LINK_BLUE = (6, 95, 212)
+
+
+def _near(p, ref, tol):
+    return all(abs(p[i] - ref[i]) <= tol for i in range(3))
+
+
+def description_open(img):
+    """True when the description sheet is showing: at least half of a strip inside its light-blue box has the box colour.
+    The normal watch page, an ad panel, My Ad Center and an error page have no such strip."""
+    hits = total = 0
+    for k in range(10):
+        fy = 0.64 + 0.16 * k / 9
+        for fx in (0.07, 0.5, 0.93):
+            total += 1
+            hits += _near(img.at(fx, fy), DESC_BOX, 8)
+    return hits / total >= 0.5
+
+
+def link_bands(img, top=0.45, bottom=0.86):
+    """Blue link text lines on the description sheet, top to bottom, as relative (x, y) centres to tap. A link that wraps onto
+    a second line counts twice; the sheet shows each link on one line with an ellipsis, so that is rare."""
+    bands, cur = [], None
+    for y in range(int(img.h * top), int(img.h * bottom)):
+        xs = [x for x in range(0, img.w, 2) if _near(img.px(x, y), LINK_BLUE, 25)]
+        if len(xs) >= 4:
+            if cur and y - cur["last"] <= 4:
+                cur["last"] = y
+                cur["xs"] += xs
+            else:
+                cur = {"first": y, "last": y, "xs": list(xs)}
+                bands.append(cur)
+    out = []
+    for b in bands:
+        if b["last"] - b["first"] < 8 or max(b["xs"]) - min(b["xs"]) < 0.15 * img.w:
+            continue                                   # a few stray pixels or a blue emoji, not a line of link text
+        out.append((sum(b["xs"]) / len(b["xs"]) / img.w, (b["first"] + b["last"]) / 2 / img.h))
+    return out

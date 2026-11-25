@@ -358,8 +358,9 @@ def _v_description_link(p):
     url, text = _desc_link_args(p)
     if not url or not YOUTUBE_URL_RE.match(str(url)):
         raise TaskError("needs a YouTube video link (https://youtube.com/... or https://youtu.be/...)")
-    if not text or not (3 <= len(text) <= 200):
-        raise TaskError("needs the link text to look for in the description (3-200 characters): 'link_text', or 'spec' as 'video link | link text'")
+    if not text or not (re.fullmatch(r"#\d{1,2}", text) or 3 <= len(text) <= 200):
+        raise TaskError("needs the link text to look for in the description (3-200 characters), or the link's number as #1, #2...: "
+                        "'link_text', or 'spec' as 'video link | link text'")
     _num(p, "ad_wait_s", 20, 180, 90)
     _num(p, "ad_blind_wait_s", 15, 120, 50)
     _num(p, "settle_s", 3, 30, 12)
@@ -409,11 +410,22 @@ def _r_description_link(ctx, p):
     started = time.monotonic()
     end = started + ad_wait
     seen_ad, clear, ad_last = False, 0, False
+    # Pixel-verified first: tap Skip until the normal watch page (grey Comments card) is on screen. The UI-dump ad check below
+    # cannot see a busy ad screen, which let the description tap land on the ad's "Sponsored" icon (My Ad Center) on 8 Nov.
+    verified = False        # the watch page is confirmed from pixels: skip the slow UI-dump ad wait
+    if _look(ctx) is not None:      # no readable screenshot: keep the UI-dump wait below (never skip blindly here)
+        ctx.wait(12)
+        cleared = _r_clear_ads(ctx, {"max_rounds": 10, "gap_s": 8, "basic": True})   # long unskippable ads exist
+        if cleared["status"] != "success":
+            shot()
+            return fail(f"{cleared['message']}; nothing was tapped", {"screenshots": shots})
+        verified = "not verified" not in cleared["message"]
+        seen_ad = "after 0 Skip" not in cleared["message"]
     tries = getattr(ctx.transport, "ui_tries", None)
     if tries is not None:
         ctx.transport.ui_tries = 1       # polling: one attempt per read (a failed read on a busy page is slow)
     try:
-        while True:
+        while not verified:
             nodes = ui_nodes(ctx)
             ad_last = _ad_on_screen(nodes)
             if ad_last:
@@ -445,21 +457,35 @@ def _r_description_link(ctx, p):
         return fail("could not tap the description row")
     ctx.wait(3)
 
-    # 4) confirm the description really opened (and an ad panel did not) before touching anything else
+    # 4) confirm the description really opened (and an ad panel did not) before touching anything else. Pixels first: the light-blue
+    #    description box is unmistakable, while the UI dump often cannot read a page with a playing video (one node, "Video player").
+    by_number = re.fullmatch(r"#(\d{1,2})", text)
     confirmed, ad_opened, wrong_sheet, nodes = False, False, False, []
-    for _ in range(3):
-        nodes = ui_nodes(ctx)
-        if _ad_on_screen(nodes):
-            ad_opened = True
-            break
-        if any(_label(n).lower() in ("copy link", "share") for n in nodes) and                 not any(_label(n).lower().startswith("description") for n in nodes):
-            wrong_sheet = True       # the tap landed on Share (or similar); close it, never touch anything in it
-            break
-        if any(_label(n).lower().startswith("description") for n in nodes) or \
-                any(text.lower() in (n["text"] + " " + n["desc"]).lower() for n in nodes):
-            confirmed = True
-            break
-        ctx.wait(2)
+    img = _look(ctx)
+    if img is not None and gl_pixels.description_open(img):
+        confirmed = True
+        if not by_number:
+            tries = getattr(ctx.transport, "ui_tries", None)
+            if tries is not None:
+                ctx.transport.ui_tries = 1
+            try:
+                nodes = ui_nodes(ctx)
+            finally:
+                if tries is not None:
+                    ctx.transport.ui_tries = tries
+    elif not by_number:
+        for _ in range(3):
+            nodes = ui_nodes(ctx)
+            if _ad_on_screen(nodes):
+                ad_opened = True
+                break
+            if any(_label(n).lower() in ("copy link", "share") for n in nodes) and                     not any(_label(n).lower().startswith("description") for n in nodes):
+                wrong_sheet = True       # the tap landed on Share (or similar); close it, never touch anything in it
+                break
+            if any(_label(n).lower().startswith("description") for n in nodes) or                     any(text.lower() in (n["text"] + " " + n["desc"]).lower() for n in nodes):
+                confirmed = True
+                break
+            ctx.wait(2)
     shot()
     if wrong_sheet:
         ctx.adb(["shell", "input", "keyevent", gl_adb.KEYCODES["back"]])
@@ -468,16 +494,34 @@ def _r_description_link(ctx, p):
     if ad_opened:
         return fail("an ad panel opened instead of the description; nothing else was tapped", {"screenshots": shots})
     if not confirmed:
-        return fail("could not confirm the description opened; the link was not tapped", {"screenshots": shots})
+        return fail("could not confirm the description opened; the link was not tapped",
+                    {"screenshots": shots, "ui_nodes": len(nodes), "labels": [_label(n)[:40] for n in nodes[:12]]})
 
-    # 5) tap the link by its text
-    link = next((n for n in sorted(nodes, key=lambda n: not n["clickable"])
-                 if text.lower() in (n["text"] + " " + n["desc"]).lower()), None)
-    if link is None:
-        return fail(f"link text '{text[:60]}' was not found in the description", {"screenshots": shots})
-    if not _tap_center(ctx, link):
-        return fail("could not tap the link", {"screenshots": shots})
-    ctx.wait(settle)
+    # 5) tap the link: by its position in the list (#N, found from the blue link text on the screenshot), or by its text
+    if by_number:
+        bands = gl_pixels.link_bands(img)
+        n = int(by_number.group(1))
+        if not 1 <= n <= len(bands):
+            return fail(f"link #{n} is not in the description (the screen shows {len(bands)} link(s)); nothing was tapped",
+                        {"screenshots": shots})
+        if not ctx.tap_normalized(*bands[n - 1]):
+            return fail("could not tap the link", {"screenshots": shots})
+        ctx.wait(settle)
+        after = _look(ctx)
+        if after is not None and gl_pixels.description_open(after):
+            shot()
+            return fail(f"tapped link #{n} but the description is still showing (the link did not open)", {"screenshots": shots})
+    else:
+        link = next((n for n in sorted(nodes, key=lambda n: not n["clickable"])
+                     if text.lower() in (n["text"] + " " + n["desc"]).lower()), None)
+        if link is None:
+            readable = any(_label(n) and _label(n).lower() != "video player" for n in nodes)
+            hint = "" if readable else (" - this phone's screen text cannot be read while the video plays: give the link's number "
+                                        "instead, as '#1' for the first link in the description, '#2' for the second")
+            return fail(f"link text '{text[:60]}' was not found in the description{hint}", {"screenshots": shots})
+        if not _tap_center(ctx, link):
+            return fail("could not tap the link", {"screenshots": shots})
+        ctx.wait(settle)
     shot()
     for _ in range(2):                    # leave the link page, then the description
         ctx.adb(["shell", "input", "keyevent", gl_adb.KEYCODES["back"]])
@@ -1027,7 +1071,7 @@ def _r_clear_ads(ctx, p):
                     return hit
                 ctx.wait(10)
             return ok("could not read the screen: tapped Skip 3 times blindly (not verified)")
-        if gl_pixels.watch_page_ready(img):
+        if (gl_pixels.watch_page_basic if p.get("basic") else gl_pixels.watch_page_ready)(img):
             return ok(f"watch page ready after {taps} Skip tap(s)")
         if i == rounds:
             break

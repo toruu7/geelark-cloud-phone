@@ -193,3 +193,12 @@ only, resolution-independent) and check what happened:
   message, so an unconfirmed result is never reported as confirmed.
 - A recipe runs as one task with a 600 s limit (the sheet's per-task timeout does not apply to it).
 Tests use real screenshots shrunk to a quarter size in `tests/fixtures/pixels/`.
+
+### Click description link (`description-link`)
+Value = `video link | #1` (or `#2`...: the Nth link in the description, found from the blue link text on the screenshot) or
+`video link | link text` (needs a phone whose screen text can be read; while a video plays the UI dump often returns only
+"Video player", and the task then tells you to use `#N`). Steps, each confirmed on the screenshot: open the video, tap Skip until
+the grey Comments card shows (`gl_pixels.watch_page_basic`, which also accepts videos with a featured comment), tap the title row,
+confirm the light-blue description box (`description_open`), tap the link, check the description closed, screenshot, go back.
+Nothing is tapped if an ad, My Ad Center or an offline screen is on top. The link opens in Chrome; the Chrome "Welcome" screen
+has to be accepted by hand once per phone. Proven live on P20 on 25 Nov 2026.
