@@ -169,8 +169,7 @@ How it works:
 - A Videos tab from an older layout gains the new columns by itself.
 - **Models get retired and busy.** The model is the `gemini_model` setting (no redeploy needed). If a row says a model is "no longer
   available", or the API keeps answering "high demand", use the GeeLark menu item **List the Gemini models my key can use**, paste a
-  `flash` model from it into `gemini_model`, and clear the row's status and note. A short demand spike (503) is retried twice inside
-  the run and then on later ticks (8 ticks, about 40 minutes); rate limits (429) the same; timeouts and bad answers give up after 3.
+  `flash` model from it into `gemini_model`, and clear the row's status and note. A short demand spike (503) gets one extra try inside the run; after a failed try the row waits 10, 20, 30... minutes before the next (the time of the last try is kept in drafted_at), for up to 8 tries (503 and per-minute 429); timeouts and bad answers give up after 3. A DAILY quota error (the free tier allows only about 20 requests a day per model) stops drafting at once with a clear note, because retrying would only use up the next day's quota: turn on billing for the key in AI Studio, or pick another model, then clear the row's status and note.
 - **Try it for real before deploying**: `tests/live_gemini_check.js` runs the same drafting code against the real Gemini API and
   prints what would appear on the Videos tab (nothing is written or posted). Set the key at a prompt, never in a file:
   `$env:GEMINI_API_KEY = Read-Host "Gemini API key"` then `node tests/live_gemini_check.js https://youtu.be/VIDEO_ID`.

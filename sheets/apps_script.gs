@@ -1316,13 +1316,17 @@ function geminiDraft_(videoUrl, ctx, map) {
     }
     // "high demand" (503) and brief gateway errors usually clear within seconds: try again twice, with a short wait, before this
     // tick gives up on the row (the next tick tries again; after DRAFT_TRIES failed ticks it becomes an error).
-    if ([500, 502, 503, 504].indexOf(resp.getResponseCode()) >= 0 && attempt < 2) { attempt++; Utilities.sleep(6000 * attempt); continue; }
+    // One extra try only: on a free-tier key every call counts against a small daily quota (about 20 a day per model).
+    if ([500, 502, 503, 504].indexOf(resp.getResponseCode()) >= 0 && attempt < 1) { attempt++; Utilities.sleep(6000 * attempt); continue; }
     break;
   }
   var code = resp.getResponseCode(), text = resp.getContentText(), data = null;
   try { data = JSON.parse(text); } catch (e) { /* not JSON */ }
   if (code !== 200 || !data) {
     var msg = data && data.error && data.error.message ? data.error.message : String(text).slice(0, 200);
+    if (code === 429 && /per day|perday|daily/i.test(String(msg))) {                 // the day's quota is gone: retrying only wastes the next day's
+      return { ok: false, error: 'quota_day', retry: false, detail: clip_(scrub_(msg, key)) };
+    }
     return { ok: false, error: 'http_' + code, retry: code === 429 || code >= 500, detail: clip_(scrub_(msg, key)) };
   }
   var parts = data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts || [];
@@ -1469,17 +1473,28 @@ function draftVideos_(limit) {
       out.waiting_for_key++;
       break;
     }
+    // After a failed try, wait before the next one (10, 20, 30... minutes): ticks come every 5 minutes, and hammering a busy or
+    // rate-limited model only uses up the API quota. The time of the last try is kept in drafted_at.
+    var prior = Number((/^retry (\d+)\//.exec(String(r.note)) || [0, 0])[1]);
+    if (prior > 0 && r.drafted_at && NOW_() - new Date(r.drafted_at) < prior * 10 * 60000) continue;
     calls++;
     var hist = commentHistory_(label, id, r._row);
     var real = youtubeComments_(id);
     var res = geminiDraft_('https://www.youtube.com/watch?v=' + id,
       { recent: hist.recent, others: hist.others, real: real, shapes: pickShapes_() }, map);
     if (!res.ok) {
+      if (res.error === 'quota_day') {
+        fail('Gemini\'s daily quota is used up for this API key (the free tier allows only about 20 requests a day per model). It resets every day. ' +
+             'To keep going now: turn on billing for the key in Google AI Studio, or choose another model in Settings (gemini_model). ' +
+             'Then clear this row\'s status and note.');
+        appendObj_(TAB.REPORTS, { timestamp: stamp(), device: '', action: 'draft', status: 'error', message: clip_('Videos row ' + r._row + ': Gemini daily quota used up. ' + (res.detail || '')) });
+        break;                                                      // every other row would hit the same wall
+      }
       var tries = Number((/^retry (\d+)\//.exec(String(r.note)) || [0, 0])[1]) + 1;
       // a demand spike (503) or a rate limit (429) is temporary: be patient (8 ticks, about 40 minutes); a timeout or a bad answer is not
       var allowed = (res.error === 'http_503' || res.error === 'http_429') ? DRAFT_TRIES_BUSY : DRAFT_TRIES;
       if (res.retry && tries < allowed) {
-        setCells_(t, r, { note: 'retry ' + tries + '/' + allowed + ': ' + res.error + (res.detail ? ' ' + res.detail : '') });
+        setCells_(t, r, { note: 'retry ' + tries + '/' + allowed + ': ' + res.error + (res.detail ? ' ' + res.detail : ''), drafted_at: stamp() });
         out.retry_later++;
         if (res.error === 'http_429') break;                        // rate limited: stop for this run
         continue;

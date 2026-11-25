@@ -956,6 +956,7 @@ function videos(answers = []) {
 const addVideo = (env, phone, action, link, comment = '', status = '') =>
   env.sheet('Videos').appendRow([true, phone, action, link, comment, status, '', '', '', '', '', '']);
 const geminiCalls = (env) => env.state.fetches.filter((f) => /generativelanguage/.test(f.url));
+const later = (env, minutes) => env.setNow(new Date(env.state.now.getTime() + minutes * 60000).toISOString());   // move the script's clock forward
 const vrows = (env) => env.rows('Videos');
 
 test('setup creates the Videos tab with its dropdowns, the three Library tasks and the new settings', () => {
@@ -1209,26 +1210,60 @@ test('drafting: a rate limit stops the run and retries later; a timeout is retri
   env.state.fetchHandler = () => { throw new Error('Timeout'); };
   env.sheet('Videos').set(2, 8, '');                                              // a timeout starts counting from scratch: 3 tries
   env.call('draftVideos_', 1);
+  later(env, 11);                                                                 // past the 10 minute back-off after the first failure
   env.call('draftVideos_', 1);
+  later(env, 21);                                                                 // past the 20 minute back-off after the second
   env.call('draftVideos_', 1);                                                    // third failed try: a timeout gives up
   assert.equal(vrows(env)[0].status, 'error');
   assert.match(vrows(env)[0].note, /Gemini failed/);
 });
 
-test('drafting: a short "high demand" (503) is retried inside the same run; a lasting one waits for the next tick', () => {
+test('drafting: a short "high demand" (503) is retried once inside the same run; a lasting one backs off before the next try', () => {
   const busy = { status: 503, body: { error: { message: 'This model is currently experiencing high demand.' } } };
-  const env = videos([busy, busy, gemini(COMMENT_A)]);                           // two busy answers, then it works
+  const env = videos([busy, gemini(COMMENT_A)]);                                 // one busy answer, then it works
   addVideo(env, 'P1', 'comment', V1);
   env.call('draftVideos_', 3);
-  assert.equal(geminiCalls(env).length, 3);
+  assert.equal(geminiCalls(env).length, 2);
   assert.equal(vrows(env)[0].status, 'review_ready');
   assert.ok(env.state.slept > 0, 'it waited between attempts');
   const down = videos([busy, busy, busy, busy, busy, busy]);                     // busy for a long time
   addVideo(down, 'P1', 'comment', V1);
   down.call('draftVideos_', 3);
-  assert.equal(geminiCalls(down).length, 3);                                     // three tries in this run, no more
+  assert.equal(geminiCalls(down).length, 2);                                     // two tries in this run, no more (quota is precious)
   assert.equal(vrows(down)[0].status, '');                                       // still waiting, not an error yet
   assert.match(vrows(down)[0].note, /retry 1\/8: http_503/);
+  assert.ok(vrows(down)[0].drafted_at, 'the time of the last try is kept for the back-off');
+  later(down, 5);                                                                 // the next tick: still backing off, no call at all
+  down.call('draftVideos_', 3);
+  assert.equal(geminiCalls(down).length, 2);
+  later(down, 6);                                                                 // 11 minutes after the failure: it tries again
+  down.call('draftVideos_', 3);
+  assert.equal(geminiCalls(down).length, 4);
+});
+
+test('drafting: when the day\'s quota is used up it stops at once, says why, and does not touch the other rows', () => {
+  const quota = { status: 429, body: { error: { message: 'You exceeded your current quota. Quota exceeded for metric: generate_content_free_tier_requests, limit: 20, model: gemini-3.8-flash, description: Generate content requests per day limit exceeded on Free Tier.' } } };
+  const env = videos([quota]);
+  addVideo(env, 'P1', 'comment', V1);
+  addVideo(env, 'P2', 'comment', V2);
+  env.call('draftVideos_', 3);
+  assert.equal(geminiCalls(env).length, 1);                                       // one call, then the whole run stops
+  const r = vrows(env);
+  assert.equal(r[0].status, 'error');
+  assert.match(r[0].note, /daily quota is used up/);
+  assert.match(r[0].note, /billing/);
+  assert.equal(r[1].status, '');                                                  // the second row was not touched, so it can still be drafted later
+  assert.ok(!r[1].note);
+  assert.ok(env.rows('Reports').some((x) => x.action === 'draft' && /daily quota/.test(x.message)));
+});
+
+test('drafting: an ordinary rate limit (per minute) is still just retried later', () => {
+  const rpm = { status: 429, body: { error: { message: 'Resource has been exhausted (e.g. check quota). Requests per minute limit exceeded.' } } };
+  const env = videos([rpm]);
+  addVideo(env, 'P1', 'comment', V1);
+  env.call('draftVideos_', 3);
+  assert.equal(vrows(env)[0].status, '');
+  assert.match(vrows(env)[0].note, /retry 1\/8: http_429/);
 });
 
 test('drafting: a long demand spike is waited out over many ticks (8), then it becomes an error; timeouts still give up after 3', () => {
@@ -1240,6 +1275,7 @@ test('drafting: a long demand spike is waited out over many ticks (8), then it b
     env.call('draftVideos_', 3);
     assert.equal(vrows(env)[0].status, '', 'tick ' + tick);
     assert.match(vrows(env)[0].note, new RegExp('retry ' + tick + '/8: http_503'));
+    later(env, 180);                                                              // well past the growing back-off (10, 20, 30... minutes)
   }
   env.call('draftVideos_', 3);                                                    // the 8th failed tick
   assert.equal(vrows(env)[0].status, 'error');
